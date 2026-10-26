@@ -15,8 +15,8 @@
 namespace ps2::vu {
 
 void kick(int unit, std::uint32_t address);
-std::uint32_t top();
-std::uint32_t itop();
+std::uint32_t top(int unit);
+std::uint32_t itop(int unit);
 void interpret(int unit, std::uint32_t pc);
 
 using ProgramFn = void (*)(Vu0Regs &r, std::uint8_t *mem);

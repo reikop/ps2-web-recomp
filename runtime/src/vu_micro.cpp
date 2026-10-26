@@ -27,6 +27,7 @@ namespace ps2::vu {
 namespace {
 
 struct Unit {
+    int n;
     Vu0Regs *regs;
     std::uint8_t *code;
     std::uint8_t *data;
@@ -45,7 +46,10 @@ struct Unit {
 
 Vu0Regs g_vu1;
 std::uint32_t g_generation[2] = {1, 1};
-std::uint32_t g_top = 0, g_itop = 0;
+// Per unit: with the VU thread of the window and web builds, VIF0 starts VU0
+// programs (setting TOP to 0) while a VU1 program runs, and one shared value
+// let VU1 read VU0's TOP mid-program (MGS2 then drew from the wrong buffer)
+std::uint32_t g_top[2] = {}, g_itop[2] = {};
 
 struct QDelay {
     std::uint32_t generation = 0, value = 0;
@@ -79,8 +83,8 @@ std::uint64_t g_reported = 0;
 bool g_reference_dry = false;
 
 Unit unit_of(int n) {
-    if (n == 0) return Unit{&g_cpu.vu0, g_vu0_code, g_vu0_mem, 4095u, 256u, g_cpu.vu0.tpc};
-    return Unit{&g_vu1, g_vu1_code, g_vu1_mem, 16383u, 1024u, g_vu1.tpc};
+    if (n == 0) return Unit{0, &g_cpu.vu0, g_vu0_code, g_vu0_mem, 4095u, 256u, g_cpu.vu0.tpc};
+    return Unit{1, &g_vu1, g_vu1_code, g_vu1_mem, 16383u, 1024u, g_vu1.tpc};
 }
 
 struct UpperOut {
@@ -595,8 +599,8 @@ void lower(Unit &u, std::uint32_t w, std::uint32_t pc, std::uint32_t &npc, bool 
         case 0x42: r.r = r.vf[fs].w[fsf] & 0x7FFFFFu; break;
         case 0x43: r.r = (r.r ^ r.vf[fs].w[fsf]) & 0x7FFFFFu; break;
         case 0x64: if (ft) for (int i = 0; i < 4; ++i) if (dest & (8u >> i)) r.vf[ft].w[i] = r.p; break;
-        case 0x68: store_vi(r, it, g_top); break;
-        case 0x69: store_vi(r, it, g_itop); break;
+        case 0x68: store_vi(r, it, g_top[u.n]); break;
+        case 0x69: store_vi(r, it, g_itop[u.n]); break;
         case 0x6C: xgkick(u, r.vi[is]); break;
         case 0x70: case 0x71: case 0x72: case 0x73: {
             const float x = u2f(r.vf[fs].w[0]), y = u2f(r.vf[fs].w[1]), z = u2f(r.vf[fs].w[2]);
@@ -701,16 +705,17 @@ void reset() {
     }
     std::memset(&g_vu1, 0, sizeof g_vu1);
     g_vu1.vf[0].w[3] = fp::kOne;
-    g_top = g_itop = 0;
+    std::memset(g_top, 0, sizeof g_top);
+    std::memset(g_itop, 0, sizeof g_itop);
 }
 
 Vu0Regs &regs(int unit) { return unit ? g_vu1 : g_cpu.vu0; }
 
 std::uint32_t tpc(int unit) { return regs(unit).tpc; }
 
-void set_tops(std::uint32_t top, std::uint32_t itop) {
-    g_top = top;
-    g_itop = itop;
+void set_tops(int unit, std::uint32_t top, std::uint32_t itop) {
+    g_top[unit] = top;
+    g_itop[unit] = itop;
 }
 
 void run_fast(int n, std::uint32_t address);
@@ -785,8 +790,8 @@ void kick(int unit, std::uint32_t address) {
     xgkick(u, address);
 }
 
-std::uint32_t top() { return g_top; }
-std::uint32_t itop() { return g_itop; }
+std::uint32_t top(int unit) { return g_top[unit]; }
+std::uint32_t itop(int unit) { return g_itop[unit]; }
 
 ProgramFn lookup(std::uint32_t address);
 
@@ -1146,8 +1151,16 @@ namespace ps2::vu {
 void state(ps2::state::Stream &s) {
     s.tag("vu");
     s.pod(g_vu1);
-    s.pod(g_top);
-    s.pod(g_itop);
+    if (s.version() >= 5) {
+        s.pod(g_top);
+        s.pod(g_itop);
+    } else {
+        // One value for both units before
+        s.pod(g_top[1]);
+        s.pod(g_itop[1]);
+        g_top[0] = g_top[1];
+        g_itop[0] = g_itop[1];
+    }
     s.bytes(g_vu0_code, sizeof g_vu0_code);
     s.bytes(g_vu0_mem, sizeof g_vu0_mem);
     s.bytes(g_vu1_code, sizeof g_vu1_code);
