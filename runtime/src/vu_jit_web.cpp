@@ -93,8 +93,8 @@ EMSCRIPTEN_KEEPALIVE void ps2jit_kick(std::uint32_t address) {
     }
     vu::kick(1, address);
 }
-EMSCRIPTEN_KEEPALIVE std::uint32_t ps2jit_top() { return vu::top(); }
-EMSCRIPTEN_KEEPALIVE std::uint32_t ps2jit_itop() { return vu::itop(); }
+EMSCRIPTEN_KEEPALIVE std::uint32_t ps2jit_top() { return vu::top(1); }
+EMSCRIPTEN_KEEPALIVE std::uint32_t ps2jit_itop() { return vu::itop(1); }
 EMSCRIPTEN_KEEPALIVE void ps2jit_interpret(Vu0Regs *r, std::uint32_t pc) {
     vu::jit::g_state.fl.flush_q(*r);
     if (vu::jit::g_dry) {

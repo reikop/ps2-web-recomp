@@ -384,8 +384,8 @@ Lower lower(std::uint32_t w, std::uint32_t pc) {
         case 0x64:
             if (ft) l.writes = static_cast<int>(ft);
             if (ft) for (int i = 0; i < 4; ++i) if (lane(dest, i)) c += std::format("r.vf[{}].w[{}] = r.p; ", ft, i); break;
-        case 0x68: c = std::format("set_vi(r, {}, vu::top()); ", it); break;
-        case 0x69: c = std::format("set_vi(r, {}, vu::itop()); ", it); break;
+        case 0x68: c = std::format("set_vi(r, {}, vu::top(1)); ", it); break;
+        case 0x69: c = std::format("set_vi(r, {}, vu::itop(1)); ", it); break;
         case 0x6C: c = std::format("vu::kick(1, r.vi[{}]); ", is); break;
         case 0x70: case 0x71: case 0x72: case 0x73: case 0x74: case 0x75: case 0x76: case 0x78: case 0x79: case 0x7A: case 0x7C: case 0x7D: case 0x7E:
             c = std::format("efu(r, {}u, {}u, {}u); ", index, fs, fsf);
