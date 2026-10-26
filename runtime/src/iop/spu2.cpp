@@ -549,6 +549,8 @@ void dma(int core, std::uint32_t madr, std::uint32_t words, bool to_spu, int cha
     if (channel >= 0) kernel::schedule(kernel::now() + 64 + words / 4, kernel::Job{kernel::kJobDmaDone, static_cast<std::uint32_t>(channel)});
 }
 
+void stop_dma(int core) { g_cores[core].transfers.clear(); }
+
 void set_sink(std::function<void(const std::int16_t *, std::size_t)> sink) { g_sink = std::move(sink); }
 
 void dump_voices() {
