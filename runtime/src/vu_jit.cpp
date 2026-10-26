@@ -921,6 +921,7 @@ private:
     void upper_pre(const Up &u, bool flags_live);
     void upper_post(const Up &u, bool flags_live);
     bool lower(std::uint32_t w, std::uint32_t pc);
+    void fsset(std::uint32_t w);
     void instruction(std::uint32_t pc, std::uint32_t following);
     void prologue();
 };
@@ -1590,18 +1591,7 @@ bool Translator::lower(std::uint32_t w, std::uint32_t pc) {
             c_.op(kOpEq);
         });
         break;
-    case 0x15:
-        c_.get(kR);
-        status();
-        c_.i32c(0x3Fu);
-        c_.op(kOpAnd);
-        c_.i32c(imm12 & 0xFC0u);
-        c_.op(kOpOr);
-        c_.store(kOffStatus);
-        fl();
-        c_.get(kR);
-        c_.call(kForceMac);
-        break;
+    case 0x15: break; // fsset(), after the upper instruction
     case 0x16:
         set_vi(it, [&] {
             status();
@@ -1696,6 +1686,23 @@ bool Translator::lower(std::uint32_t w, std::uint32_t pc) {
     return true;
 }
 
+// FSSET waits for the upper instruction of its pair, whose status it replaces
+// the sticky flags of (as in the interpreter)
+void Translator::fsset(std::uint32_t w) {
+    const std::uint32_t imm12 = ((w >> 10) & 0x800u) | (w & 0x7FFu);
+    c_.get(kR);
+    c_.get(kR);
+    c_.load(kOffStatus);
+    c_.i32c(0x3Fu);
+    c_.op(kOpAnd);
+    c_.i32c(imm12 & 0xFC0u);
+    c_.op(kOpOr);
+    c_.store(kOffStatus);
+    fl();
+    c_.get(kR);
+    c_.call(kForceMac);
+}
+
 void Translator::instruction(std::uint32_t pc, std::uint32_t following) {
     const std::uint32_t lo = word(pc), hi = word(pc + 4);
     const Up u = decode_upper(hi);
@@ -1720,12 +1727,15 @@ void Translator::instruction(std::uint32_t pc, std::uint32_t following) {
     const auto delay = delay_.find(pc);
     delay_mode_ = delay == delay_.end() ? 0 : delay->second;
     delay_reg_ = delay_mode_ == 1 ? vi_def_[(pc - 8u) & kMask] : 0;
+    bool fsset_after = false;
     if (hi & 0x80000000u) {
         c_.get(kR);
         c_.i32c(lo);
         c_.store(kOffI);
     } else if (!li.supported || !lower(lo, pc)) {
         leave(pc);
+    } else {
+        fsset_after = (lo >> 25) == 0x15;
     }
     delay_mode_ = 0;
     if (keep_bk_.count(pc)) {
@@ -1737,6 +1747,7 @@ void Translator::instruction(std::uint32_t pc, std::uint32_t following) {
         c_.set(kBi);
     }
     upper_post(u, flags_live);
+    if (fsset_after) fsset(lo);
     const int written = lower_write(pc);
     const std::uint64_t live = shadow_out_[pc >> 3];
     if (written >= 0 && shadow_.count(written) && ((live >> written) & 1u)) {

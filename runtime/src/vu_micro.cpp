@@ -37,6 +37,10 @@ struct Unit {
     // What a branch reads of the integer registers: the values from before the
     // previous instruction when that one wrote them (see BranchView).
     const std::uint16_t *branch_vi = nullptr;
+    // FSSET waits for the upper instruction of its pair: the sticky flags it
+    // sets replace those of the status that instruction writes (MGS3 clears
+    // them next to an OPMSUB before testing its collision triangles)
+    std::int32_t fsset = -1;
 };
 
 Vu0Regs g_vu1;
@@ -660,8 +664,11 @@ void lower(Unit &u, std::uint32_t w, std::uint32_t pc, std::uint32_t &npc, bool 
     case 0x13: store_vi(r, 1, ((clip_flags() | w) & 0xFFFFFFu) == 0xFFFFFFu ? 1u : 0u); break;
     case 0x14: store_vi(r, it, (status_flags() & 0xFFFu) == ((((w >> 10) & 0x800u) | (w & 0x7FFu))) ? 1u : 0u); break;
     case 0x15:
+        if (u.pipe) {
+            u.fsset = static_cast<std::int32_t>((((w >> 10) & 0x800u) | (w & 0x7FFu)) & 0xFC0u);
+            break;
+        }
         r.status = (status_flags() & 0x3Fu) | ((((w >> 10) & 0x800u) | (w & 0x7FFu)) & 0xFC0u);
-        if (u.pipe) u.pipe->force_mac(r.mac, r.status);
         break;
     case 0x16: store_vi(r, it, status_flags() & (((w >> 10) & 0x800u) | (w & 0x7FFu))); break;
     case 0x17: store_vi(r, it, ((status_flags() | (((w >> 10) & 0x800u) | (w & 0x7FFu))) & 0xFFFu) == 0xFFFu ? 1u : 0u); break;
@@ -1039,6 +1046,11 @@ void run_fast(int n, std::uint32_t address) {
             set_flags(r, out.value, out.dest);
             pipe.set_mac(r.mac, r.status);
         }
+        if (u.fsset >= 0) {
+            r.status = (r.status & 0x3Fu) | static_cast<std::uint32_t>(u.fsset);
+            pipe.force_mac(r.mac, r.status);
+            u.fsset = -1;
+        }
         if (out.has_clip) {
             r.clip = out.clip;
             pipe.set_clip(out.clip, pipe.t);
@@ -1096,6 +1108,11 @@ void run(int n, std::uint32_t address) {
         view.commit(was, lo, !(hi & 0x80000000u));
         commit(r, out);
         if (out.target >= 0 && out.flags) pipe.set_mac(r.mac, r.status);
+        if (u.fsset >= 0) {
+            r.status = (r.status & 0x3Fu) | static_cast<std::uint32_t>(u.fsset);
+            pipe.force_mac(r.mac, r.status);
+            u.fsset = -1;
+        }
         if (out.has_clip) {
             r.clip = out.clip;
             pipe.set_clip(out.clip, pipe.t);

@@ -30,7 +30,7 @@ int main(int argc, char **argv) {
     const auto branch = [](unsigned op, unsigned is, unsigned it, unsigned from, unsigned to) {
         return (op << 25) | (is << 11) | (it << 16) | (((to - from - 8u) / 8u) & 0x7FFu);
     };
-    for (int test = 0; test < 8; ++test) {
+    for (int test = 0; test < 9; ++test) {
         Program p{static_cast<std::uint64_t>(test), 0, std::vector<std::uint8_t>(16384)};
         const auto put = [&](unsigned pc, std::uint32_t lo, std::uint32_t hi = unop) {
             std::memcpy(p.code.data() + pc, &lo, 4);
@@ -52,6 +52,9 @@ int main(int argc, char **argv) {
             put(40, branch(0x28, 1, 3, 40, 72));
             put(56, addi(2, 0, 1), unop | end);
             put(72, addi(2, 0, 2), unop | end);
+        } else if (test == 8) {
+            // FSSET clears the sticky flags after its upper instruction set them.
+            put(0, 0x15u << 25, (0xFu << 21) | (2u << 16) | (1u << 11) | (3u << 6) | 0x28u | end);
         } else if (test >= 6) {
             // JR/JALR read the operand without the delay; JALR also overwrites it.
             put(0, addi(1, 0, 1));
@@ -68,15 +71,18 @@ int main(int argc, char **argv) {
         std::ofstream(out / std::format("{}.wasm", test), std::ios::binary).write(reinterpret_cast<const char *>(wasm.data()), wasm.size());
     }
     native << "int main() {\n";
-    for (int test = 0; test < 8; ++test) {
+    for (int test = 0; test < 9; ++test) {
         native << "{ Vu0Regs r{}; std::uint8_t mem[16384]{}; r.vi[1]=2; r.vi[3]=2; r.clip=1;"
                   "for (int i=0;i<4;++i) r.vf[1].w[i]=0xBF800000; r.vf[0].w[3]=0x3F800000;\n";
         if (test == 5) native << "r.vi[1]=0xFFFF;\n";
         native << std::format("vu1_{:016X}(r, mem);\n", test);
-        native << (test >= 6 ? "if (r.tpc != 8) return 1;\n" : test == 4 ? "if (r.mac != 0xF0 || r.status != 0x82) return 1;\n" : "if (r.vi[2] != 2) return 1;\n");
+        native << (test == 8   ? "if (r.mac != 0xF0 || r.status != 0x02) return 1;\n"
+                   : test >= 6 ? "if (r.tpc != 8) return 1;\n"
+                   : test == 4 ? "if (r.mac != 0xF0 || r.status != 0x82) return 1;\n"
+                               : "if (r.vi[2] != 2) return 1;\n");
         native << "}\n";
     }
-    native << "puts(\"8 native VU regressions passed\"); }\n";
+    native << "puts(\"9 native VU regressions passed\"); }\n";
     std::ofstream offsets(out / "offsets.json");
     offsets << std::format("{{\"vi\":{},\"vf\":{},\"clip\":{},\"mac\":{},\"status\":{},\"tpc\":{}}}", offsetof(ps2::Vu0Regs, vi), offsetof(ps2::Vu0Regs, vf), offsetof(ps2::Vu0Regs, clip), offsetof(ps2::Vu0Regs, mac), offsetof(ps2::Vu0Regs, status), offsetof(ps2::Vu0Regs, tpc));
 }
@@ -87,7 +93,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const dir = process.argv[2];
 const off = JSON.parse(fs.readFileSync(path.join(dir, 'offsets.json')));
-for (let test = 0; test < 8; ++test) {
+for (let test = 0; test < 9; ++test) {
   const memory = new WebAssembly.Memory({initial: 1, maximum: 65536, shared: true});
   const view = new DataView(memory.buffer);
   const r = 0x3000;
@@ -104,8 +110,12 @@ for (let test = 0; test < 8; ++test) {
   }
   env.clip = () => 1;
   env.status = () => 0;
+  env.force_mac = () => {};
   new WebAssembly.Instance(mod, {env}).exports.run(r, 0x4000);
-  if (test >= 6) {
+  if (test === 8) {
+    if (view.getUint32(r + off.mac, true) !== 0xF0 || view.getUint32(r + off.status, true) !== 0x02)
+      throw Error('FSSET was overwritten by its upper instruction');
+  } else if (test >= 6) {
     if (view.getUint32(r + off.tpc, true) !== 8) throw Error(`Register jump regression ${test}`);
   } else if (test === 4) {
     if (view.getUint32(r + off.mac, true) !== 0xF0 || view.getUint32(r + off.status, true) !== 0x82)
@@ -114,7 +124,7 @@ for (let test = 0; test < 8; ++test) {
     throw Error(`Branch VI regression ${test}`);
   }
 }
-console.log('8 Wasm VU regressions passed');
+console.log('9 Wasm VU regressions passed');
 '''
 
 

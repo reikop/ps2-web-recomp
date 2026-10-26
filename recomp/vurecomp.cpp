@@ -282,6 +282,8 @@ std::string lanes_store(unsigned dest, const std::string &qword_expr, const std:
 
 struct Lower {
     std::string code;
+    // Runs after the upper instruction of the pair has committed its flags (FSSET)
+    std::string after_upper;
     int writes = -1;
     bool reads_flags = false, reads_status = false;
     bool branch = false, jump = false;
@@ -425,7 +427,7 @@ Lower lower(std::uint32_t w, std::uint32_t pc) {
     case 0x12: c = std::format("set_vi(r, 1, (fl.clip() & {}u) ? 1u : 0u); ", w & 0xFFFFFFu); break;
     case 0x13: c = std::format("set_vi(r, 1, ((fl.clip() | {}u) & 0xFFFFFFu) == 0xFFFFFFu ? 1u : 0u); ", w & 0xFFFFFFu); break;
     case 0x14: c = std::format("set_vi(r, {}, (fl.status() & 0xFFFu) == {}u ? 1u : 0u); ", it, imm12); l.reads_flags = l.reads_status = true; break;
-    case 0x15: c = std::format("r.status = (fl.status() & 0x3Fu) | ({}u & 0xFC0u); fl.force_mac(r.mac, r.status); ", imm12); l.reads_flags = l.reads_status = true; break;
+    case 0x15: l.after_upper = std::format("r.status = (r.status & 0x3Fu) | {}u; fl.force_mac(r.mac, r.status); ", imm12 & 0xFC0u); l.reads_flags = l.reads_status = true; break;
     case 0x16: c = std::format("set_vi(r, {}, fl.status() & {}u); ", it, imm12); l.reads_flags = l.reads_status = true; break;
     case 0x17: c = std::format("set_vi(r, {}, ((fl.status() | {}u) & 0xFFFu) == 0xFFFu ? 1u : 0u); ", it, imm12); l.reads_flags = l.reads_status = true; break;
     case 0x18: c = std::format("set_vi(r, {}, (fl.mac() & 0xFFFFu) == r.vi[{}] ? 1u : 0u); ", it, is); l.reads_flags = true; break;
@@ -591,6 +593,7 @@ std::string generate(const Program &p, std::string &name) {
         if (keep_bk.count(pc)) body += "bk = next_bk; ";
         if (set_bi.count(pc)) body += std::format("bi = {}u; ", std::max(def[pc], 0));
         body += u.post;
+        if (!(hi & 0x80000000u) && l.supported) body += l.after_upper;
         o += std::format("{}: {{ ++fl.t; ", label(pc));
         if (any_q && ps2::vu::reads_q(hi)) {
             const ps2::vu::QRead kind = ps2::vu::q_read_kind(p.code.data(), kMask, pc);
