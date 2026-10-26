@@ -26,6 +26,7 @@ constexpr int kErrorSemaZero = -419;
 constexpr int kErrorEventCondition = -421;
 constexpr int kErrorMbxNone = -424;
 constexpr int kErrorNoMemory = -400;
+constexpr int kErrorIllegalObject = -201;
 constexpr int kErrorUnknownModule = -202;
 
 std::uint32_t arg(const Cpu &c, int i) { return i < 4 ? c.r[4 + i] : read32(c.r[29] + 16u + static_cast<std::uint32_t>(i - 4) * 4u); }
@@ -983,6 +984,44 @@ void install_stdio() {
 
 void install_modload() {
     register_hle_library("modload", 0x0102);
+    // the calling thread waits until the module's start routine returns, *result gets what it returned
+    const auto start_and_wait = [](Cpu &c, int id, std::uint32_t arglen, std::uint32_t args, std::uint32_t result_at) {
+        Thread *caller = current();
+        if (!caller) { c.r[2] = static_cast<std::uint32_t>(kErrorUnknownModule); return; }
+        std::string text;
+        if (args && arglen && phys(args) + arglen <= kRamSize) text.assign(reinterpret_cast<const char *>(ram_ptr(args)), arglen);
+        const int waiter = caller->id;
+        const bool started = start_module(id, text, [waiter, result_at](int module, int result) {
+            if (result_at) write32(result_at, static_cast<std::uint32_t>(result));
+            if (Thread *t = thread(waiter)) wake(*t, static_cast<std::uint32_t>(module));
+        });
+        if (!started) { c.r[2] = static_cast<std::uint32_t>(kErrorUnknownModule); return; }
+        block(c, kWaitHle, 0);
+    };
+    def("modload", 7, "LoadStartModule", [](Cpu &c) {
+        Thread *caller = current();
+        if (!caller) { c.r[2] = static_cast<std::uint32_t>(kErrorUnknownModule); return; }
+        std::string text;
+        const std::uint32_t arglen = arg(c, 1), args = arg(c, 2), result_at = arg(c, 3);
+        if (args && arglen && phys(args) + arglen <= kRamSize) text.assign(reinterpret_cast<const char *>(ram_ptr(args)), arglen);
+        const int waiter = caller->id;
+        const std::int32_t id = load_module(ram_string(arg(c, 0), 256), text, [waiter, result_at](int module, int result) {
+            if (result_at) write32(result_at, static_cast<std::uint32_t>(result));
+            if (Thread *t = thread(waiter)) wake(*t, static_cast<std::uint32_t>(module));
+        });
+        if (id < 0) { c.r[2] = static_cast<std::uint32_t>(kErrorIllegalObject); return; }
+        block(c, kWaitHle, 0);
+    });
+    def("modload", 8, "StartModule", [start_and_wait](Cpu &c) {
+        start_and_wait(c, static_cast<int>(arg(c, 0)), arg(c, 2), arg(c, 3), arg(c, 4));
+    });
+    def("modload", 10, "LoadModuleBuffer", [](Cpu &c) {
+        const std::uint32_t at = phys(arg(c, 0));
+        if (at >= kRamSize) { c.r[2] = static_cast<std::uint32_t>(kErrorIllegalObject); return; }
+        const std::uint8_t *p = ram_ptr(at);
+        const std::int32_t id = link_module(std::vector<std::uint8_t>(p, p + (kRamSize - at)), "buffer");
+        c.r[2] = static_cast<std::uint32_t>(id < 0 ? kErrorIllegalObject : id);
+    });
     def("modload", 13, "SetCheckKelfPathCallback", [](Cpu &c) { c.r[2] = 0; });
     def("modload", 16, "GetModuleIdList", [](Cpu &c) {
         std::uint32_t n = 0;
