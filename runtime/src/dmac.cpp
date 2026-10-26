@@ -154,6 +154,24 @@ void run_from_spr_chain() {
 
 void run_normal(int ch) {
     Channel &c = g_ch[ch];
+    if ((ch == 8 || ch == 9) && ((c.chcr >> 2) & 3u) == 2u) {
+        // interleave: TQWC qwords at a time, main memory skipping SQWC
+        // qwords after each piece while the scratchpad side stays contiguous
+        // (MGS2 gathers 12 of each object's 19 qwords this way)
+        const std::uint32_t skip = g_sqwc & 0xFFu;
+        std::uint32_t piece = (g_sqwc >> 16) & 0xFFu;
+        if (!piece) piece = c.qwc;
+        for (std::uint32_t left = c.qwc; left;) {
+            const std::uint32_t n = std::min(piece, left);
+            if (ch == 8) spr_to_ram(c, n);
+            else deliver(9, c.madr, n);
+            c.madr += (n + skip) * 16;
+            left -= n;
+        }
+        c.qwc = 0;
+        finish(ch);
+        return;
+    }
     if (ch == 8) {
         spr_to_ram(c, c.qwc);
         c.madr = spr_advance(c.madr, c.qwc);
