@@ -31,6 +31,8 @@ endif()
 add_library(ps2runtime STATIC
     runtime/src/memory.cpp
     runtime/src/dispatch.cpp
+    runtime/src/interp.cpp
+    recomp/r5900.cpp
     runtime/src/system.cpp
     runtime/src/kernel.cpp
     runtime/src/hw.cpp
@@ -57,6 +59,7 @@ add_library(ps2runtime STATIC
     runtime/src/iop/sif.cpp
     runtime/src/iop/cdvdfsv.cpp)
 target_include_directories(ps2runtime PUBLIC runtime/include)
+target_include_directories(ps2runtime PRIVATE recomp)
 target_compile_options(ps2runtime PRIVATE -Wall -Wextra)
 
 set(PS2_WGPU_DIR "${CMAKE_SOURCE_DIR}/third_party/wgpu-native" CACHE PATH "wgpu-native release folder")

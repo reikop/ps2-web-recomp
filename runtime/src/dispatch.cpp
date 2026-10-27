@@ -241,10 +241,46 @@ bool has_code(std::uint32_t pc) {
     return mu && mu->entries[(pc - m->base - mu->base) >> 2] != 0;
 }
 
+// Code the translation lacks runs in the interpreter instead of halting: always
+// in the browser, natively with PS2_INTERP (exploring runs halt to find it).
+bool interpreter_on() {
+#ifdef __EMSCRIPTEN__
+    return true;
+#else
+    static const bool on = std::getenv("PS2_INTERP") != nullptr;
+    return on;
+#endif
+}
+
+void interpret(Cpu &c, std::uint32_t, std::uint32_t depth);
+
+// debugging aid: PS2_INTERP_RANGE=lo,hi runs code entered there in the
+// interpreter, to tell a translation bug from a runtime one
+struct InterpRange {
+    std::uint32_t lo = 0, hi = 0;
+    InterpRange() {
+        if (const char *s = std::getenv("PS2_INTERP_RANGE")) std::sscanf(s, "%x,%x", &lo, &hi);
+    }
+    bool has(std::uint32_t pc) const { return pc - lo < hi - lo; }
+};
+const InterpRange g_forced;
+
+// whether dispatch finds translated code at the pc, for the interpreter to hand back to
+bool translated(std::uint32_t pc) {
+    if (g_forced.has(pc)) return false;
+    if (const UnitInfo *u = unit_for(pc); u && u->entries[(pc - u->base) >> 2]) return true;
+    if (const Instance *m = proven_instance_for(pc)) {
+        const UnitInfo *mu = module_unit(*m->module, pc - m->base);
+        if (mu && mu->entries[(pc - m->base - mu->base) >> 2]) return true;
+    }
+    return instance_with_entry(pc) != nullptr;
+}
+
 void dispatch(Cpu &c, std::uint32_t, std::uint32_t depth) {
     const std::uint32_t pc = c.pc;
     if (pc & kUnwind) return;
     if (pc == kHandlerReturn || pc == kIdle) return;
+    if (g_forced.has(pc)) [[clang::musttail]] return interpret(c, 0u, depth);
     const UnitInfo *u = unit_for(pc);
     const std::uint16_t id = u ? u->entries[(pc - u->base) >> 2] : 0;
     if (!id) {
@@ -268,6 +304,7 @@ void dispatch(Cpu &c, std::uint32_t, std::uint32_t depth) {
             [[clang::musttail]] return mu->function(c, mu->entries[(pc - other->base - mu->base) >> 2], depth);
         }
         record_miss(pc);
+        if (interpreter_on()) [[clang::musttail]] return interpret(c, 0u, depth);
         char reason[64];
         std::snprintf(reason, sizeof reason, "missing code at 0x%08X (ra 0x%08X)", pc, c.r[31].w[0]);
         std::fprintf(stderr, "[ee] no translated code at 0x%08X (ra 0x%08X)\n", pc, c.r[31].w[0]);
