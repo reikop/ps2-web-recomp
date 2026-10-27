@@ -74,7 +74,7 @@ struct UnitRow {
 class Generator {
 public:
     Generator(const Translation &t, const CodegenOptions &options)
-        : image_(*t.image), p_(*t.program), links_(t.links), prefix_(t.prefix), relocatable_(t.relocatable), options_(options),
+        : image_(*t.image), p_(*t.program), links_(t.links), prefix_(t.prefix), relocatable_(t.relocatable), window_(t.fixed_module), options_(options),
           layout_(*t.program, options.unit_bits) {}
 
     std::vector<UnitRow> run() {
@@ -234,7 +234,8 @@ private:
                 falls = fl != Flow::Jump && fl != Flow::JumpRegister;
                 skip = true;
                 if (falls && (labels_.count(a + 4) || !in_unit(a + 4))) {
-                    if (in_unit(a + 8) && p_.is_code(a + 8)) line("goto " + label(a + 8) + ";");
+                    // a+8 gets a label only as code; a seed that decodes data can leave it none
+                    if (in_unit(a + 8) && labels_.count(a + 8) && p_.is_code(a + 8)) line("goto " + label(a + 8) + ";");
                     else exit_to(a + 8);
                     falls = false;
                 }
@@ -257,7 +258,7 @@ private:
 
     void exit_to(std::uint32_t a) {
         flush();
-        if (p_.is_code(a)) {
+        if (p_.is_code(a) && !window_) {
             line(std::format("{}[[clang::musttail]] return {}(c, {}u, depth);", rebase(), unit_name(layout_.unit_of(a)), id_of(a)));
         } else {
             line(std::format("c.pc = {}; [[clang::musttail]] return dispatch(c, 0u, depth);", pc(a)));
@@ -267,14 +268,15 @@ private:
     std::string jump(std::uint32_t t, std::uint32_t from) {
         std::string check = t <= from ? std::format("if (c.budget < 0 && preempt(c)) {{ c.pc = {} | kUnwind; return; }} ", pc(t)) : "";
         if (in_unit(t) && p_.is_code(t)) return check + "goto " + label(t) + ";";
-        if (p_.is_code(t))
+        if (p_.is_code(t) && !window_)
             return check + std::format("{}[[clang::musttail]] return {}(c, {}u, depth);", rebase(), unit_name(layout_.unit_of(t)), id_of(t));
+        if (p_.is_code(t)) return check + std::format("c.pc = {}; [[clang::musttail]] return dispatch(c, 0u, depth);", pc(t));
         return std::format("c.pc = {}; [[clang::musttail]] return dispatch(c, 0u, depth);", pc(t));
     }
 
     std::string call_to(std::uint32_t t, std::uint32_t ret) {
         std::string invoke;
-        if (p_.is_code(t))
+        if (p_.is_code(t) && !(window_ && !in_unit(t)))
             invoke = relocatable_ ? std::format("if (depth < kMaxDepth) {{ c.base = B; {}(c, {}u, depth + 1u); }} else {{ c.pc = {}; return; }}",
                                                 unit_name(layout_.unit_of(t)), id_of(t), pc(t))
                                   : std::format("if (depth < kMaxDepth) {}(c, {}u, depth + 1u); else {{ c.pc = {}; return; }}",
@@ -319,6 +321,12 @@ private:
         const std::string slot = delay(ds);
         const std::string link = std::format("c.r[31].sd[0] = static_cast<std::int32_t>({});", pc(ret));
         const std::uint32_t t = i.branch_target_of();
+        // a game can load another image over the window while a function of it is
+        // still running (MGS2 swaps its stage code that way): before calling out,
+        // window code checks its call is still the one in memory and otherwise
+        // goes on in whatever image is there now
+        if (window_ && !dynamic_jump(a) && (i.op == Jal || i.op == Bltzal || i.op == Bgezal || i.op == Bltzall || i.op == Bgezall))
+            line(std::format("if (ld32({}) != {}) [[unlikely]] {{ c.pc = {}; [[clang::musttail]] return dispatch(c, 0u, depth); }}", pc(a), hex(i.word), pc(a)));
         if (dynamic_jump(a)) {
             const std::string target = std::format("const std::uint32_t t = (({} + 4u) & 0xF0000000u) | ((ld32({}) & 0x03FFFFFFu) << 2);", pc(a), pc(a));
             if (i.op == Jal)
@@ -773,6 +781,9 @@ private:
     const Links *links_;
     std::string prefix_;
     bool relocatable_;
+    // A window image is proven unit by unit, so control leaving a unit goes
+    // through dispatch, which proves the unit it enters.
+    bool window_;
     const CodegenOptions &options_;
     Layout layout_;
     std::vector<std::map<std::uint32_t, std::uint16_t>> ids_;
