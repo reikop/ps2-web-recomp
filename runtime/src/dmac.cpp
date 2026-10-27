@@ -152,8 +152,31 @@ void run_from_spr_chain() {
     finish(8);
 }
 
+void run_interleave(int ch) {
+    Channel &c = g_ch[ch];
+    const std::uint32_t transfer = (g_sqwc >> 16) & 0xFFu, skip = g_sqwc & 0xFFu;
+    for (std::uint32_t i = 0; i < c.qwc; ++i) {
+        std::uint8_t *spr = g_spr + (c.sadr & (kScratchpadSize - 1));
+        if (ch == 8) {
+            std::memcpy(target(c.madr), spr, 16);
+            watch_span(c.madr, 16, "dma:spr_to_ram");
+        } else {
+            std::memcpy(spr, source(c.madr), 16);
+        }
+        c.sadr = (c.sadr + 16) & (kScratchpadSize - 1);
+        c.madr += 16;
+        if ((i + 1) % transfer == 0) c.madr += skip * 16;
+    }
+    c.qwc = 0;
+    finish(ch);
+}
+
 void run_normal(int ch) {
     Channel &c = g_ch[ch];
+    if ((ch == 8 || ch == 9) && ((c.chcr >> 2) & 3u) == 2u && ((g_sqwc >> 16) & 0xFFu)) {
+        run_interleave(ch);
+        return;
+    }
     if (ch == 8) {
         spr_to_ram(c, c.qwc);
         c.madr = spr_advance(c.madr, c.qwc);
