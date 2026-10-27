@@ -5,8 +5,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <map>
 #include <set>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace ps2 {
@@ -33,14 +35,21 @@ std::uint32_t g_module_span = 0;
 std::vector<Instance> g_instances;
 constexpr std::size_t kMaxInstances = 64;
 
+// a check at an offset with bit 0 set is of a template word the code reads at run time
+inline bool check_ok(std::uint32_t base, std::uint32_t at, std::uint32_t value) {
+    const std::uint32_t w = ld32(base + (at & ~3u));
+    return (at & 1u) ? template_mask(w) == value : w == value;
+}
+
 bool loaded_at(const ModuleInfo &m, std::uint32_t base) {
+    if (m.flags & kModuleTemplate) return false;
     if (m.fixed_base) {
         if (base != m.fixed_base) return false;
     } else if (ld32(base + 0x2Cu) != m.size) {
         return false;
     }
     for (std::uint32_t k = 0; k < m.check_count; ++k)
-        if (ld32(base + m.checks[2 * k]) != m.checks[2 * k + 1]) return false;
+        if (!check_ok(base, m.checks[2 * k], m.checks[2 * k + 1])) return false;
     return true;
 }
 
@@ -80,7 +89,7 @@ bool unit_in_place(const ModuleInfo &m, std::uint32_t pc) {
     unit_checks(m, pc - m.fixed_base, from, to);
     if (from == to) return false;
     for (std::uint32_t k = from; k < to; ++k)
-        if (ld32(m.fixed_base + m.checks[2 * k]) != m.checks[2 * k + 1]) return false;
+        if (!check_ok(m.fixed_base, m.checks[2 * k], m.checks[2 * k + 1])) return false;
     return true;
 }
 
@@ -93,13 +102,127 @@ bool near_in_place(const Instance &i, std::uint32_t pc) {
     unit_checks(m, pc - i.base, from, to);
     if (from == to) return false;
     const std::uint32_t c = from + g_spot_cursor++ % (to - from);
-    if (ld32(i.base + m.checks[2 * c]) != m.checks[2 * c + 1]) return false;
+    if (!check_ok(i.base, m.checks[2 * c], m.checks[2 * c + 1])) return false;
     const std::uint32_t at = first_check(m, pc - i.base);
     const std::uint32_t lo = std::max(from, at > kNearChecks / 2 ? at - kNearChecks / 2 : 0u);
     const std::uint32_t hi = std::min(to, at + kNearChecks);
     for (std::uint32_t k = lo; k < hi; ++k)
-        if (ld32(i.base + m.checks[2 * k]) != m.checks[2 * k + 1]) return false;
+        if (!check_ok(i.base, m.checks[2 * k], m.checks[2 * k + 1])) return false;
     return true;
+}
+
+// Templates: an area a game fills with code linked to other addresses each
+// time (MGS3's stages). A pc there is found in the template holding the piece
+// around it (from past a "jr ra" and its delay slot to the next ones) by the
+// hash of the piece's masked words; the instance is cached by where it starts.
+constexpr std::uint32_t kJrRa = 0x03E00008u;
+constexpr std::uint32_t kMaxPiece = 0x40000u;
+const TemplatePiece *g_pieces = nullptr;
+std::uint32_t g_piece_count = 0;
+std::uint32_t g_area_begin = 0, g_area_end = 0;
+std::map<std::uint32_t, Instance> g_template_instances;
+
+// debugging aid: PS2_TEMPLATE_STATS prints how dispatch used the templates at exit
+struct TemplateStats {
+    bool on = std::getenv("PS2_TEMPLATE_STATS") != nullptr;
+    std::uint64_t found = 0, not_found = 0, entered = 0, no_entry = 0;
+    std::set<std::uint32_t> missing, unknown;
+    ~TemplateStats() {
+        if (!on) return;
+        // PS2_TEMPLATE_STATS=/path also lists the pcs
+        if (const char *path = std::getenv("PS2_TEMPLATE_STATS"); path[0] == '/') {
+            std::ofstream out(path);
+            for (std::uint32_t pc : missing) out << "entry " << std::hex << pc << "\n";
+            for (std::uint32_t pc : unknown) out << "unknown " << std::hex << pc << "\n";
+        }
+        std::fprintf(stderr, "[templates] pieces found %llu, not found %llu, entries served %llu, no entry %llu (%zu pcs)\n",
+                     static_cast<unsigned long long>(found), static_cast<unsigned long long>(not_found), static_cast<unsigned long long>(entered),
+                     static_cast<unsigned long long>(no_entry), missing.size());
+    }
+};
+TemplateStats g_tstats;
+
+bool in_template_area(std::uint32_t pc) { return g_piece_count && pc - g_area_begin < g_area_end - g_area_begin; }
+
+// every check of the template from offset to end at base
+bool template_range_ok(const ModuleInfo &m, std::uint32_t base, std::uint32_t offset, std::uint32_t end) {
+    const std::uint32_t to = first_check(m, end);
+    for (std::uint32_t k = first_check(m, offset); k < to; ++k)
+        if (!check_ok(base, m.checks[2 * k], m.checks[2 * k + 1])) return false;
+    return true;
+}
+
+// pcs no template served lately: the lookup is long, and a game calls such a
+// pc again and again (it runs in an image of the area or the interpreter)
+std::unordered_map<std::uint32_t, unsigned long long> g_no_template;
+constexpr unsigned long long kNoTemplateFrames = 120;
+
+const Instance *find_template(std::uint32_t pc) {
+    if (const auto it = g_no_template.find(pc); it != g_no_template.end() && frame_count() - it->second < kNoTemplateFrames) return nullptr;
+    std::uint32_t start = pc & ~3u;
+    while (ld32(start - 8u) != kJrRa) {
+        start -= 4u;
+        if (pc - start > kMaxPiece || start <= g_area_begin) return nullptr;
+    }
+    std::uint32_t end = start;
+    while (ld32(end) != kJrRa) {
+        end += 4u;
+        if (end - start > kMaxPiece || end >= g_area_end) return nullptr;
+    }
+    end += 8u;
+    const std::uint32_t words = (end - start) >> 2;
+    std::uint64_t h = 1469598103934665603ull ^ words;
+    h *= 1099511628211ull;
+    for (std::uint32_t a = start; a < end; a += 4u) {
+        h ^= template_mask(ld32(a));
+        h *= 1099511628211ull;
+    }
+    const TemplatePiece *p = std::lower_bound(g_pieces, g_pieces + g_piece_count, h, [](const TemplatePiece &x, std::uint64_t v) { return x.hash < v; });
+    for (; p != g_pieces + g_piece_count && p->hash == h; ++p) {
+        if (p->words != words) continue;
+        const ModuleInfo &m = g_modules[p->module];
+        const std::uint32_t base = start - p->offset;
+        if (!template_range_ok(m, base, p->offset, p->offset + words * 4u)) continue;
+        if (g_template_instances.size() > 8192) g_template_instances.clear();
+        auto [it, fresh] = g_template_instances.insert_or_assign(base + kTemplateBase, Instance{base, &m});
+        ++g_tstats.found;
+        return &it->second;
+    }
+    ++g_tstats.not_found;
+    if (g_tstats.on) g_tstats.unknown.insert(pc);
+    if (g_no_template.size() > 65536) g_no_template.clear();
+    g_no_template[pc] = frame_count();
+    return nullptr;
+}
+
+const Instance *template_instance(std::uint32_t pc) {
+    auto it = g_template_instances.upper_bound(pc);
+    if (it != g_template_instances.begin()) {
+        --it;
+        if (pc - it->first < it->second.module->size) {
+            if (near_in_place(it->second, pc)) return &it->second;
+            g_template_instances.erase(it);
+        }
+    }
+    return find_template(pc);
+}
+
+// all checks of the unit of a template instance holding the pc
+bool template_proven(const Instance &i, std::uint32_t pc) {
+    std::uint32_t from, to;
+    unit_checks(*i.module, pc - i.base, from, to);
+    if (from == to) return false;
+    for (std::uint32_t k = from; k < to; ++k)
+        if (!check_ok(i.base, i.module->checks[2 * k], i.module->checks[2 * k + 1])) return false;
+    return true;
+}
+
+void forget_template(const Instance *i) {
+    for (auto it = g_template_instances.begin(); it != g_template_instances.end(); ++it)
+        if (&it->second == i) {
+            g_template_instances.erase(it);
+            return;
+        }
 }
 
 const Instance *in_place(const Instance &i, std::uint32_t pc) {
@@ -117,6 +240,7 @@ Instance make_instance(std::uint32_t base, const ModuleInfo *m) {
 const Instance *instance_for(std::uint32_t pc);
 
 bool proven(const Instance &i, std::uint32_t pc) {
+    if (i.module->flags & kModuleTemplate) return template_proven(i, pc);
     return i.module->fixed_base ? unit_in_place(*i.module, pc) : loaded_at(*i.module, i.base);
 }
 
@@ -128,6 +252,7 @@ bool proven(const Instance &i, std::uint32_t pc) {
 const Instance *proven_instance_for(std::uint32_t pc) {
     const Instance *i = instance_for(pc);
     if (!i || proven(*i, pc)) return i;
+    if (i->module->flags & kModuleTemplate) forget_template(i);
     for (std::size_t k = 0; k < g_instances.size(); ++k)
         if (&g_instances[k] == i) {
             g_instances.erase(g_instances.begin() + static_cast<std::ptrdiff_t>(k));
@@ -138,6 +263,8 @@ const Instance *proven_instance_for(std::uint32_t pc) {
 }
 
 const Instance *instance_for(std::uint32_t pc) {
+    if (in_template_area(pc))
+        if (const Instance *t = template_instance(pc)) return t;
     for (std::size_t k = 0; k < g_instances.size(); ++k) {
         const Instance &i = g_instances[k];
         if (pc - i.base >= i.module->size) continue;
@@ -161,7 +288,7 @@ const Instance *instance_for(std::uint32_t pc) {
     for (std::uint32_t at = pc & ~15u; pc - at < g_module_span; at -= 16) {
         if (ld32(at) == kModuleMagic) {
             for (std::uint32_t k = 0; k < g_module_count; ++k)
-                if (pc - at < g_modules[k].size && loaded_at(g_modules[k], at)) {
+                if (!(g_modules[k].flags & kModuleTemplate) && pc - at < g_modules[k].size && loaded_at(g_modules[k], at)) {
                     g_instances.push_back(make_instance(at, &g_modules[k]));
                     return &g_instances.back();
                 }
@@ -230,7 +357,18 @@ void register_modules(const ModuleInfo *modules, std::uint32_t count) {
     g_modules = modules;
     g_module_count = count;
     g_instances.clear();
-    for (std::uint32_t k = 0; k < count; ++k) g_module_span = std::max(g_module_span, modules[k].size);
+    for (std::uint32_t k = 0; k < count; ++k)
+        if (!(modules[k].flags & kModuleTemplate)) g_module_span = std::max(g_module_span, modules[k].size);
+}
+
+void register_templates(const TemplatePiece *pieces, std::uint32_t count, std::uint32_t area_begin, std::uint32_t area_end) {
+    static const bool off = std::getenv("PS2_NO_TEMPLATES") != nullptr;
+    if (off) return;
+    g_pieces = pieces;
+    g_piece_count = count;
+    g_area_begin = area_begin;
+    g_area_end = area_end;
+    g_template_instances.clear();
 }
 
 bool has_code(std::uint32_t pc) {
@@ -290,8 +428,17 @@ void dispatch(Cpu &c, std::uint32_t, std::uint32_t depth) {
             const UnitInfo *mu = module_unit(*m->module, pc - base);
             const std::uint16_t entry = mu ? mu->entries[(pc - base - mu->base) >> 2] : 0;
             if (entry) {
+                if (g_tstats.on && (m->module->flags & kModuleTemplate)) ++g_tstats.entered;
                 c.base = base;
                 [[clang::musttail]] return mu->function(c, entry, depth);
+            }
+            // a template was found by the piece around the pc, proven then
+            if (m->module->flags & kModuleTemplate) {
+                if (g_tstats.on) {
+                    ++g_tstats.no_entry;
+                    g_tstats.missing.insert(pc);
+                }
+                break;
             }
             // no entry here may only mean the cached image went stale
             const ModuleInfo *was = m->module;

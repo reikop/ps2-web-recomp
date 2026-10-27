@@ -21,6 +21,9 @@ if(NOT EMSCRIPTEN)
         recomp/snr2.cpp)
     target_compile_options(eerecomp PRIVATE -Wall -Wextra)
 
+    add_executable(eetemplates recomp/templates.cpp)
+    target_compile_options(eetemplates PRIVATE -Wall -Wextra)
+
     add_executable(vujit_dump recomp/vujit_dump.cpp runtime/src/vu_jit.cpp)
     target_include_directories(vujit_dump PRIVATE runtime/include runtime/src)
     add_executable(vurecomp recomp/vurecomp.cpp)

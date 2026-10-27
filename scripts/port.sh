@@ -117,7 +117,12 @@ if windows=$(python3 -I "$here/windows.py" list "$elf" "${extra_windows[@]}") &&
   echo "code windows the game rewrites: $(echo "$windows" | tr '\n' ' ')"
 fi
 
-translate() { "$tools/eerecomp" "$elf" --entries "$game/entries.txt" "${modules[@]}" "${overlays[@]}" --out "$generated" | tail -1; }
+# games/<name>/templates: code the game links to another address in each image
+# of an area (MGS3's stages), built from those images by the template builder
+templates=()
+[ -d "$game/templates" ] && templates=(--templates "$game/templates")
+
+translate() { "$tools/eerecomp" "$elf" --entries "$game/entries.txt" "${modules[@]}" "${overlays[@]}" "${templates[@]}" --out "$generated" | tail -1; }
 
 echo "== [3/6] machine code to C++"
 touch "$game/entries.txt"
