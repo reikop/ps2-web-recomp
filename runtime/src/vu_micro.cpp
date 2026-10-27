@@ -55,7 +55,7 @@ struct QDelay {
     std::uint32_t generation = 0, value = 0;
 };
 
-QDelay g_q_delay[2][2048], g_q_kind[2][2048];
+QDelay g_q_delay[2][2048], g_q_kind[2][2048], g_stall[2][2048];
 
 void read_q(const Unit &u, vuops::FlagPipe &pipe, Vu0Regs &r, std::uint32_t pc, std::uint32_t hi) {
     if (!pipe.q_pending || !reads_q(hi)) return;
@@ -75,6 +75,15 @@ std::uint32_t q_delay_of(const Unit &u, std::uint32_t pc, std::uint32_t latency)
     if (d.generation != g_generation[n]) {
         d.generation = g_generation[n];
         d.value = q_delay(u.code, u.code_mask, pc, latency);
+    }
+    return d.value;
+}
+
+std::uint32_t stall_of(const Unit &u, std::uint32_t pc) {
+    QDelay &d = g_stall[u.n][(pc & u.code_mask) >> 3];
+    if (d.generation != g_generation[u.n]) {
+        d.generation = g_generation[u.n];
+        d.value = stall(u.code, u.code_mask, pc);
     }
     return d.value;
 }
@@ -662,7 +671,7 @@ void lower(Unit &u, std::uint32_t w, std::uint32_t pc, std::uint32_t &npc, bool 
     case 0x10: store_vi(r, 1, (clip_flags() & 0xFFFFFFu) == (w & 0xFFFFFFu) ? 1u : 0u); break;
     case 0x11:
         r.clip = w & 0xFFFFFFu;
-        if (u.pipe) u.pipe->set_clip(r.clip, u.pipe->t - 4u);
+        if (u.pipe) u.pipe->set_clip(r.clip, u.pipe->now() - 4u);
         break;
     case 0x12: store_vi(r, 1, (clip_flags() & w & 0xFFFFFFu) ? 1u : 0u); break;
     case 0x13: store_vi(r, 1, ((clip_flags() | w) & 0xFFFFFFu) == 0xFFFFFFu ? 1u : 0u); break;
@@ -1074,6 +1083,7 @@ void run_fast(int n, std::uint32_t address) {
         pc = npc;
         npc = (npc + 8u) & u.code_mask;
         ++pipe.t;
+        pipe.stalls += stall_of(u, current);
         read_q(u, pipe, r, current, hi);
         fast_upper(r, d, out);
         std::uint16_t was[16];
@@ -1106,7 +1116,7 @@ void run_fast(int n, std::uint32_t address) {
         }
         if (out.has_clip) {
             r.clip = out.clip;
-            pipe.set_clip(out.clip, pipe.t);
+            pipe.set_clip(out.clip, pipe.now());
         }
         r.vf[0].d[0] = 0;
         r.vf[0].w[2] = 0;
@@ -1144,6 +1154,7 @@ void run(int n, std::uint32_t address) {
         pc = npc;
         npc = (npc + 8u) & u.code_mask;
         ++pipe.t;
+        pipe.stalls += stall_of(u, current);
         read_q(u, pipe, r, current, hi);
         UpperOut out = upper(r, hi);
         bool branch = false;
@@ -1168,7 +1179,7 @@ void run(int n, std::uint32_t address) {
         }
         if (out.has_clip) {
             r.clip = out.clip;
-            pipe.set_clip(out.clip, pipe.t);
+            pipe.set_clip(out.clip, pipe.now());
         }
         r.vf[0].d[0] = 0;
         r.vf[0].w[2] = 0;

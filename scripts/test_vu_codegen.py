@@ -30,7 +30,7 @@ int main(int argc, char **argv) {
     const auto branch = [](unsigned op, unsigned is, unsigned it, unsigned from, unsigned to) {
         return (op << 25) | (is << 11) | (it << 16) | (((to - from - 8u) / 8u) & 0x7FFu);
     };
-    for (int test = 0; test < 9; ++test) {
+    for (int test = 0; test < 10; ++test) {
         Program p{static_cast<std::uint64_t>(test), 0, std::vector<std::uint8_t>(16384)};
         const auto put = [&](unsigned pc, std::uint32_t lo, std::uint32_t hi = unop) {
             std::memcpy(p.code.data() + pc, &lo, 4);
@@ -55,6 +55,15 @@ int main(int argc, char **argv) {
         } else if (test == 8) {
             // FSSET clears the sticky flags after its upper instruction set them.
             put(0, 0x15u << 25, (0xFu << 21) | (2u << 16) | (1u << 11) | (3u << 6) | 0x28u | end);
+        } else if (test == 9) {
+            // Clip flags reach FCGET four cycles after CLIP, waits included: the
+            // MTIR waits two cycles for the MFIR, so the FCGET three instructions
+            // after the first CLIP sees both (God of War II's culling).
+            const auto clip = [](unsigned fs, unsigned ft) { return (0xEu << 21) | (ft << 16) | (fs << 11) | (7u << 6) | 0x3Fu; };
+            put(0, (0x40u << 25) | (8u << 21) | (5u << 16) | (15u << 6) | 0x3Du, clip(1, 3));
+            put(8, nop, clip(1, 0));
+            put(16, (0x40u << 25) | (4u << 16) | (5u << 11) | (15u << 6) | 0x3Cu);
+            put(24, (0x1Cu << 25) | (2u << 16), unop | end);
         } else if (test >= 6) {
             // JR/JALR read the operand without the delay; JALR also overwrites it.
             put(0, addi(1, 0, 1));
@@ -71,20 +80,26 @@ int main(int argc, char **argv) {
         std::ofstream(out / std::format("{}.wasm", test), std::ios::binary).write(reinterpret_cast<const char *>(wasm.data()), wasm.size());
     }
     native << "int main() {\n";
-    for (int test = 0; test < 9; ++test) {
+    for (int test = 0; test < 10; ++test) {
         native << "{ Vu0Regs r{}; std::uint8_t mem[16384]{}; r.vi[1]=2; r.vi[3]=2; r.clip=1;"
                   "for (int i=0;i<4;++i) r.vf[1].w[i]=0xBF800000; r.vf[0].w[3]=0x3F800000;\n";
         if (test == 5) native << "r.vi[1]=0xFFFF;\n";
+        if (test == 9) native << "r.vf[3].w[3]=0x3F000000;\n";
         native << std::format("vu1_{:016X}(r, mem);\n", test);
-        native << (test == 8   ? "if (r.mac != 0xF0 || r.status != 0x02) return 1;\n"
+        native << (test == 9   ? "if (r.vi[2] != 0xA80) return 1;\n"
+                   : test == 8 ? "if (r.mac != 0xF0 || r.status != 0x02) return 1;\n"
                    : test >= 6 ? "if (r.tpc != 8) return 1;\n"
                    : test == 4 ? "if (r.mac != 0xF0 || r.status != 0x82) return 1;\n"
                                : "if (r.vi[2] != 2) return 1;\n");
         native << "}\n";
     }
-    native << "puts(\"9 native VU regressions passed\"); }\n";
+    native << "puts(\"10 native VU regressions passed\"); }\n";
     std::ofstream offsets(out / "offsets.json");
-    offsets << std::format("{{\"vi\":{},\"vf\":{},\"clip\":{},\"mac\":{},\"status\":{},\"tpc\":{}}}", offsetof(ps2::Vu0Regs, vi), offsetof(ps2::Vu0Regs, vf), offsetof(ps2::Vu0Regs, clip), offsetof(ps2::Vu0Regs, mac), offsetof(ps2::Vu0Regs, status), offsetof(ps2::Vu0Regs, tpc));
+    using ps2::vuops::FlagPipe;
+    offsets << std::format("{{\"vi\":{},\"vf\":{},\"clip\":{},\"mac\":{},\"status\":{},\"tpc\":{},\"t\":{},\"stalls\":{},\"ch\":{},\"clip_ts\":{},\"clip_v\":{}}}",
+                           offsetof(ps2::Vu0Regs, vi), offsetof(ps2::Vu0Regs, vf), offsetof(ps2::Vu0Regs, clip), offsetof(ps2::Vu0Regs, mac),
+                           offsetof(ps2::Vu0Regs, status), offsetof(ps2::Vu0Regs, tpc), offsetof(FlagPipe, t), offsetof(FlagPipe, stalls),
+                           offsetof(FlagPipe, ch), offsetof(FlagPipe, clip_ts), offsetof(FlagPipe, clip_v));
 }
 '''
 
@@ -93,7 +108,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const dir = process.argv[2];
 const off = JSON.parse(fs.readFileSync(path.join(dir, 'offsets.json')));
-for (let test = 0; test < 9; ++test) {
+for (let test = 0; test < 10; ++test) {
   const memory = new WebAssembly.Memory({initial: 1, maximum: 65536, shared: true});
   const view = new DataView(memory.buffer);
   const r = 0x3000;
@@ -102,17 +117,29 @@ for (let test = 0; test < 9; ++test) {
   view.setUint32(r + off.clip, 1, true);
   view.setUint32(r + off.vf + 12, 0x3F800000, true);
   for (let i = 0; i < 4; ++i) view.setUint32(r + off.vf + 16 + 4*i, 0xBF800000, true);
+  if (test === 9) view.setUint32(r + off.vf + 3*16 + 12, 0x3F000000, true);
   const mod = new WebAssembly.Module(fs.readFileSync(path.join(dir, `${test}.wasm`)));
   const env = {memory};
   for (const imp of WebAssembly.Module.imports(mod)) {
     if (imp.kind !== 'function') continue;
     env[imp.name] = () => { throw Error(`Unexpected import: ${imp.name}`); };
   }
-  env.clip = () => 1;
+  // FlagPipe::clip(): the latest clip flags at least four cycles old
+  env.clip = (fl) => {
+    const now = view.getUint32(fl + off.t, true) + view.getUint32(fl + off.stalls, true);
+    const ch = view.getUint32(fl + off.ch, true);
+    for (let k = 1; k <= 8; ++k) {
+      const i = (ch - k) & 7;
+      if (view.getUint32(fl + off.clip_ts + 4*i, true) + 4 <= now) return view.getUint32(fl + off.clip_v + 4*i, true);
+    }
+    return view.getUint32(fl + off.clip_v + 4*((ch - 8) & 7), true);
+  };
   env.status = () => 0;
   env.force_mac = () => {};
   new WebAssembly.Instance(mod, {env}).exports.run(r, 0x4000);
-  if (test === 8) {
+  if (test === 9) {
+    if (view.getUint16(r + off.vi + 4, true) !== 0xA80) throw Error('Clip flags ignored the wait before FCGET');
+  } else if (test === 8) {
     if (view.getUint32(r + off.mac, true) !== 0xF0 || view.getUint32(r + off.status, true) !== 0x02)
       throw Error('FSSET was overwritten by its upper instruction');
   } else if (test >= 6) {
@@ -124,7 +151,7 @@ for (let test = 0; test < 9; ++test) {
     throw Error(`Branch VI regression ${test}`);
   }
 }
-console.log('9 Wasm VU regressions passed');
+console.log('10 Wasm VU regressions passed');
 '''
 
 
