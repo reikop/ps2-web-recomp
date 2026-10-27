@@ -44,7 +44,7 @@ constexpr std::uint32_t kOffQ = offsetof(Vu0Regs, q), kOffP = offsetof(Vu0Regs, 
 constexpr std::uint32_t kOffMac = offsetof(Vu0Regs, mac);
 constexpr std::uint32_t kOffMh = offsetof(vuops::FlagPipe, mh), kOffCh = offsetof(vuops::FlagPipe, ch), kOffMacTs = offsetof(vuops::FlagPipe, mac_ts),
                         kOffMacV = offsetof(vuops::FlagPipe, mac_v), kOffStatusV = offsetof(vuops::FlagPipe, status_v), kOffClipTs = offsetof(vuops::FlagPipe, clip_ts),
-                        kOffClipV = offsetof(vuops::FlagPipe, clip_v), kOffT = offsetof(vuops::FlagPipe, t), kOffQPending = offsetof(vuops::FlagPipe, q_pending),
+                        kOffClipV = offsetof(vuops::FlagPipe, clip_v), kOffT = offsetof(vuops::FlagPipe, t), kOffStalls = offsetof(vuops::FlagPipe, stalls), kOffQPending = offsetof(vuops::FlagPipe, q_pending),
                         kOffQValue = offsetof(vuops::FlagPipe, q_value), kOffQReady = offsetof(vuops::FlagPipe, q_ready);
 constexpr std::uint32_t kOffStatus = offsetof(Vu0Regs, status), kOffClip = offsetof(Vu0Regs, clip), kOffTpc = offsetof(Vu0Regs, tpc);
 
@@ -390,7 +390,7 @@ private:
     std::set<std::uint32_t> keep_bk_, set_bi_;
     int delay_mode_ = 0;
     unsigned delay_reg_ = 0;
-    bool any_status_ = false, any_flags_ = false;
+    bool any_status_ = false, any_flags_ = false, any_clip_ = false;
 
     std::uint32_t word(std::uint32_t at) const {
         std::uint32_t v;
@@ -469,6 +469,13 @@ private:
         fl();
         c_.get(kT);
         c_.store(kOffT);
+    }
+    // FlagPipe::now(): the clip flags count waits too
+    void now() {
+        c_.get(kT);
+        fl();
+        c_.load(kOffStalls);
+        c_.op(kOpAdd);
     }
     void br(std::uint32_t depth) {
         c_.byte(kOpBr);
@@ -1168,7 +1175,7 @@ void Translator::upper_post(const Up &u, bool flags_live) {
         c_.get(kR);
         c_.get(kUclip);
         c_.store(kOffClip);
-        ring_clip([&] { c_.get(kUclip); }, [&] { c_.get(kT); });
+        ring_clip([&] { c_.get(kUclip); }, [&] { now(); });
         return;
     }
     if (!active(u, flags_live)) return;
@@ -1557,7 +1564,7 @@ bool Translator::lower(std::uint32_t w, std::uint32_t pc) {
         c_.store(kOffClip);
         ring_clip([&] { c_.i32c(imm24); },
                   [&] {
-                      c_.get(kT);
+                      now();
                       c_.i32c(4);
                       c_.op(kOpSub);
                   });
@@ -1713,6 +1720,15 @@ void Translator::instruction(std::uint32_t pc, std::uint32_t following) {
     c_.i32c(1);
     c_.op(kOpAdd);
     c_.set(kT);
+    if (any_clip_)
+        if (const std::uint32_t wait = stall(code_, kMask, pc)) {
+            fl();
+            fl();
+            c_.load(kOffStalls);
+            c_.i32c(wait);
+            c_.op(kOpAdd);
+            c_.store(kOffStalls);
+        }
     if (reads_q(hi)) {
         const QRead kind = q_read_kind(code_, kMask, pc);
         if (kind == kQNew) flush_q();
@@ -1848,6 +1864,9 @@ void Translator::prologue() {
     fl();
     c_.i32c(0);
     c_.store8(kOffQPending);
+    fl();
+    c_.i32c(0);
+    c_.store(kOffStalls);
     c_.i32c(16);
     c_.set(kT);
     for (unsigned i = 1; i < 16; ++i) {
@@ -1877,6 +1896,7 @@ bool Translator::run(std::vector<std::uint8_t> &out) {
         if (!(word(pc + 4) & 0x80000000u)) l = analyze_lower(word(pc), pc);
         any_status_ = any_status_ || l.reads_status;
         any_flags_ = any_flags_ || l.reads_flags;
+        any_clip_ = any_clip_ || reads_clip(word(pc), word(pc + 4));
         lowers_[pc] = l;
     }
     for (std::uint32_t pc : pcs_) live_in_[pc] = false;

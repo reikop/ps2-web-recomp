@@ -206,6 +206,33 @@ inline std::uint32_t q_delay(const std::uint8_t *code, std::uint32_t mask, std::
     return latency;
 }
 
+// Cycles the pair at pc waits for results of the pairs before it, in a
+// straight line as q_delay assumes. A result is waited for at most three
+// pairs later, but whether those pairs waited themselves depends on the ones
+// before them, so the run starts eight pairs back.
+inline std::uint32_t stall(const std::uint8_t *code, std::uint32_t mask, std::uint32_t pc) {
+    std::uint32_t ready[32][4] = {}, vi_ready[16] = {};
+    std::uint32_t cycle = 0;
+    for (int k = -8; k <= 0; ++k) {
+        const std::uint32_t at = (pc + static_cast<std::uint32_t>(k) * 8u) & mask;
+        std::uint32_t lo, hi;
+        std::memcpy(&lo, code + at, 4);
+        std::memcpy(&hi, code + at + 4, 4);
+        const VfUse u = vf_use(lo, hi);
+        const std::uint32_t issued = issue(u, cycle + 1u, ready, vi_ready);
+        if (k == 0) return issued - (cycle + 1u);
+        cycle = issued;
+        retire(u, cycle, ready, vi_ready);
+    }
+    return 0;
+}
+
+// FCEQ, FCAND, FCOR and FCGET read the clip flags
+inline bool reads_clip(std::uint32_t lo, std::uint32_t hi) {
+    const std::uint32_t op = lower_major(lo);
+    return !(hi & 0x80000000u) && (op == 0x10 || op == 0x12 || op == 0x13 || op == 0x1C);
+}
+
 inline std::uint32_t q_unit_latency(std::uint32_t lo, std::uint32_t hi) {
     if ((hi & 0x80000000u) || lower_major(lo) != 0x40 || (lo & 0x3Cu) != 0x3Cu) return 0;
     const unsigned index = ((lo >> 6) & 31u) * 4u + (lo & 3u);
@@ -459,6 +486,9 @@ PS2_VU_INLINE void clip(Vu0Regs &r, const Reg128 &s, std::uint32_t w) {
 
 struct FlagPipe {
     std::uint32_t t = 16;
+    // Cycles spent waiting on results (stall()), which the clip flags count
+    // and the slot counter t does not.
+    std::uint32_t stalls = 0;
     std::uint32_t mac_ts[8] = {}, mac_v[8] = {}, status_v[8] = {}, clip_ts[8] = {}, clip_v[8] = {};
     unsigned mh = 0, ch = 0;
     std::uint32_t q_value = 0, q_ready = 0;
@@ -515,10 +545,16 @@ struct FlagPipe {
     }
     PS2_VU_INLINE std::uint32_t mac() const { return mac_v[mac_slot()]; }
     PS2_VU_INLINE std::uint32_t status() const { return status_v[mac_slot()]; }
+    PS2_VU_INLINE std::uint32_t now() const { return t + stalls; }
+    // Clip flags reach FCAND/FCOR/FCEQ/FCGET four cycles after CLIP, stalls
+    // included (clip_ts holds now()). God of War II reads them with an FCGET
+    // three instructions after a pair of CLIPs, with an MTIR between that
+    // waits one or two cycles for its operand; Metal Gear Solid 2 and 3 read
+    // them four to six instructions after three CLIPs in a row, with no wait.
     PS2_VU_INLINE std::uint32_t clip() const {
         for (unsigned k = 1; k <= 8; ++k) {
             const unsigned i = (ch - k) & 7u;
-            if (clip_ts[i] + 3u <= t) return clip_v[i];
+            if (clip_ts[i] + 4u <= now()) return clip_v[i];
         }
         return clip_v[(ch - 8) & 7u];
     }
