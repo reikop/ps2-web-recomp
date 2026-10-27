@@ -1612,12 +1612,10 @@ bool Translator::lower(std::uint32_t w, std::uint32_t pc) {
     case 0x17:
         set_vi(it, [&] {
             status();
-            c_.i32c(imm12);
-            c_.op(kOpOr);
             c_.i32c(0xFFFu);
             c_.op(kOpAnd);
-            c_.i32c(0xFFFu);
-            c_.op(kOpEq);
+            c_.i32c(imm12);
+            c_.op(kOpOr);
         });
         break;
     case 0x18:
@@ -1639,12 +1637,10 @@ bool Translator::lower(std::uint32_t w, std::uint32_t pc) {
     case 0x1B:
         set_vi(it, [&] {
             mac();
-            vi(is);
-            c_.op(kOpOr);
             c_.i32c(0xFFFFu);
             c_.op(kOpAnd);
-            c_.i32c(0xFFFFu);
-            c_.op(kOpEq);
+            vi(is);
+            c_.op(kOpOr);
         });
         break;
     case 0x1C:

@@ -427,10 +427,10 @@ Lower lower(std::uint32_t w, std::uint32_t pc) {
     case 0x14: c = std::format("set_vi(r, {}, (fl.status() & 0xFFFu) == {}u ? 1u : 0u); ", it, imm12); l.reads_flags = l.reads_status = true; break;
     case 0x15: c = std::format("r.status = (fl.status() & 0x3Fu) | ({}u & 0xFC0u); fl.force_mac(r.mac, r.status); ", imm12); l.reads_flags = l.reads_status = true; break;
     case 0x16: c = std::format("set_vi(r, {}, fl.status() & {}u); ", it, imm12); l.reads_flags = l.reads_status = true; break;
-    case 0x17: c = std::format("set_vi(r, {}, ((fl.status() | {}u) & 0xFFFu) == 0xFFFu ? 1u : 0u); ", it, imm12); l.reads_flags = l.reads_status = true; break;
+    case 0x17: c = std::format("set_vi(r, {}, (fl.status() & 0xFFFu) | {}u); ", it, imm12); l.reads_flags = l.reads_status = true; break;
     case 0x18: c = std::format("set_vi(r, {}, (fl.mac() & 0xFFFFu) == r.vi[{}] ? 1u : 0u); ", it, is); l.reads_flags = true; break;
     case 0x1A: c = std::format("set_vi(r, {}, fl.mac() & r.vi[{}]); ", it, is); l.reads_flags = true; break;
-    case 0x1B: c = std::format("set_vi(r, {}, ((fl.mac() | r.vi[{}]) & 0xFFFFu) == 0xFFFFu ? 1u : 0u); ", it, is); l.reads_flags = true; break;
+    case 0x1B: c = std::format("set_vi(r, {}, (fl.mac() & 0xFFFFu) | r.vi[{}]); ", it, is); l.reads_flags = true; break;
     case 0x1C: c = std::format("set_vi(r, {}, fl.clip() & 0xFFFu); ", it); break;
     case 0x20: c = "pend = true; "; l.branch = true; l.target = target; break;
     case 0x21: c = std::format("set_vi(r, {}, {}u); pend = true; ", it, (pc + 16u) / 8u); l.branch = true; l.target = target; break;

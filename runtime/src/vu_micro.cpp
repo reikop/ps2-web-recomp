@@ -664,10 +664,10 @@ void lower(Unit &u, std::uint32_t w, std::uint32_t pc, std::uint32_t &npc, bool 
         if (u.pipe) u.pipe->force_mac(r.mac, r.status);
         break;
     case 0x16: store_vi(r, it, status_flags() & (((w >> 10) & 0x800u) | (w & 0x7FFu))); break;
-    case 0x17: store_vi(r, it, ((status_flags() | (((w >> 10) & 0x800u) | (w & 0x7FFu))) & 0xFFFu) == 0xFFFu ? 1u : 0u); break;
+    case 0x17: store_vi(r, it, (status_flags() & 0xFFFu) | (((w >> 10) & 0x800u) | (w & 0x7FFu))); break;
     case 0x18: store_vi(r, it, (mac_flags_now() & 0xFFFFu) == r.vi[is] ? 1u : 0u); break;
     case 0x1A: store_vi(r, it, mac_flags_now() & r.vi[is]); break;
-    case 0x1B: store_vi(r, it, ((mac_flags_now() | r.vi[is]) & 0xFFFFu) == 0xFFFFu ? 1u : 0u); break;
+    case 0x1B: store_vi(r, it, (mac_flags_now() & 0xFFFFu) | r.vi[is]); break;
     case 0x1C: store_vi(r, it, clip_flags() & 0xFFFu); break;
     case 0x20: branch_to(target); break;
     case 0x21: store_vi(r, it, (pc + 16u) / 8u); branch_to(target); break;
