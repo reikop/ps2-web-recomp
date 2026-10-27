@@ -29,7 +29,11 @@ follow one another into a template. For every template it writes `T<n>.bin`
 | `weak <offset>` | a piece start, or where a word of some image points: code if it decodes as code |
 | `at <image> <address>` | a place it occupies |
 
-`port.sh` passes `games/<name>/templates` to the recompiler when it exists.
+For MGS2 and MGS3, `scripts/mgs_templates.sh <name>` does it all: `mgs_stages`
+decrypts and inflates the stage images from the disc (the cipher is described
+at the top of `recomp/mgs_stages.cpp`; MGS2's stages load at 0x1EF600) and
+`eetemplates` builds `games/<name>/templates`. `port.sh` passes the folder to
+the recompiler when it exists.
 
 ## Translating them
 

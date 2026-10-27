@@ -24,6 +24,12 @@ if(NOT EMSCRIPTEN)
     add_executable(eetemplates recomp/templates.cpp)
     target_compile_options(eetemplates PRIVATE -Wall -Wextra)
 
+    find_package(ZLIB)
+    if(ZLIB_FOUND)
+        add_executable(mgs_stages recomp/mgs_stages.cpp)
+        target_link_libraries(mgs_stages PRIVATE ZLIB::ZLIB)
+    endif()
+
     add_executable(vujit_dump recomp/vujit_dump.cpp runtime/src/vu_jit.cpp)
     target_include_directories(vujit_dump PRIVATE runtime/include runtime/src)
     add_executable(vurecomp recomp/vurecomp.cpp)
