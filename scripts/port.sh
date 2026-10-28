@@ -5,7 +5,7 @@ here="$ROOT/scripts"
 
 usage() {
   cat <<'EOF'
-usage: scripts/port.sh <name> <game.iso | game.zip | game.7z> [options]
+usage: scripts/port.sh <name> <game.iso | game.bin | game.cue | game.zip | game.7z> [options]
 
 Turns a PS2 disc image you own into a browser build in build/web-<name> and a
 native one in build/native-<name>. It reads the boot program named in
@@ -67,17 +67,7 @@ if [ -e "$iso" ]; then
   echo "already in place"
 else
   case "${source_path,,}" in
-    *.zip)
-      python3 -I - "$source_path" "$iso" <<'EOF'
-import shutil, sys, zipfile
-with zipfile.ZipFile(sys.argv[1]) as archive:
-    images = [m for m in archive.infolist() if m.filename.lower().endswith('.iso')]
-    if not images:
-        sys.exit('no .iso inside the archive')
-    with archive.open(max(images, key=lambda m: m.file_size)) as src, open(sys.argv[2], 'wb') as dst:
-        shutil.copyfileobj(src, dst, 1 << 24)
-EOF
-      ;;
+    *.zip|*.bin|*.cue|*.img) python3 -I "$here/disc.py" iso "$source_path" "$iso" ;;
     *.7z) 7z e -so -r "$source_path" '*.iso' > "$iso" ;;
     *) ln -s "$(realpath "$source_path")" "$iso" ;;
   esac

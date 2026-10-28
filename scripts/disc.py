@@ -2,7 +2,9 @@ import argparse
 import fnmatch
 import os
 import struct
+import shutil
 import sys
+import zipfile
 
 SECTOR = 2048
 
@@ -134,14 +136,54 @@ def modules(image, destination):
     print('%d SNR2 modules extracted to %s' % (len(found), destination))
 
 
+def open_source(source):
+    lower = source.lower()
+    if lower.endswith('.zip'):
+        archive = zipfile.ZipFile(source)
+        members = archive.infolist()
+        for ending in ('.iso', '.bin', '.img'):
+            found = [m for m in members if m.filename.lower().endswith(ending)]
+            if found:
+                return archive.open(max(found, key=lambda m: m.file_size))
+        sys.exit('no .iso, .bin or .img inside the archive')
+    if lower.endswith('.cue'):
+        with open(source, errors='replace') as cue:
+            for line in cue:
+                parts = line.strip().split('"')
+                if line.strip().upper().startswith('FILE') and len(parts) >= 2:
+                    return open(os.path.join(os.path.dirname(source), parts[1]), 'rb')
+        sys.exit('the cue sheet names no file')
+    return open(source, 'rb')
+
+
+def to_iso(source, target):
+    sync = b'\x00' + b'\xff' * 10 + b'\x00'
+    with open_source(source) as src, open(target, 'wb') as dst:
+        first = src.read(2352)
+        if len(first) < 2352 or first[:12] != sync:
+            dst.write(first)
+            shutil.copyfileobj(src, dst, 1 << 24)
+            return
+        start = 16 if first[15] == 1 else 24
+        sector = first
+        while len(sector) == 2352:
+            dst.write(sector[start:start + SECTOR])
+            sector = src.read(2352)
+
+
 def main():
     parser = argparse.ArgumentParser(description='Read files from PS2 CD and DVD images, including both layers of a DVD9.')
-    parser.add_argument('command', choices=['info', 'list', 'extract', 'modules'])
+    parser.add_argument('command', choices=['info', 'list', 'extract', 'modules', 'iso'])
     parser.add_argument('image')
     parser.add_argument('destination', nargs='?')
     parser.add_argument('patterns', nargs='*', help='paths or globs to extract, everything below --limit if omitted')
     parser.add_argument('--limit', type=int, default=64, help='MiB; larger files stay in the image unless named')
     args = parser.parse_args()
+    if args.command == 'iso':
+        if not args.destination:
+            parser.error('iso needs the .iso file to write')
+        to_iso(args.image, args.destination)
+        return
     image = Image(args.image)
     if args.command == 'info':
         info(image)
