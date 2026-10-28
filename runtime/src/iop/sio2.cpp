@@ -272,6 +272,14 @@ void process() {
     if (port == 2) memory_card(at, out_size);
     else if (device == 0x5FFFFu || device == 0x00030064u || port >= 2) no_device();
     else controller(port, at, out_size);
+    static const bool trace = std::getenv("PS2_TRACE_PAD") != nullptr;
+    if (trace && port < 2) {
+        std::fprintf(stderr, "[pad] port %d ctrl2 %08X in", port, device);
+        for (const std::uint8_t v : g_in) std::fprintf(stderr, " %02X", v);
+        std::fprintf(stderr, " out");
+        for (std::size_t i = at; i < g_out.size(); ++i) std::fprintf(stderr, " %02X", g_out[i]);
+        std::fprintf(stderr, "\n");
+    }
     g_in.clear();
     ++g_index;
 }
