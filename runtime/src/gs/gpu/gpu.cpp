@@ -412,14 +412,34 @@ bool reads_own_word(const std::uint32_t *rec, const std::uint32_t *setup) {
     return ox == 0 && (tpsm == fpsm || (wide(fpsm) && wide(tpsm)));
 }
 
-Range read_range(const std::uint32_t *rec, const std::uint32_t *setup, const Range &whole) {
-    if (rec[1] != 1 || !(setup[0] & 16u)) return whole;
+bool read_rect(const std::uint32_t *rec, const std::uint32_t *setup, int &u0, int &v0, int &u1, int &v1) {
+    const int tw = std::max(1 << (setup[15] & 0xFFu), static_cast<int>(setup[18] >> 16) + 1), th = std::max(1 << (setup[15] >> 8), static_cast<int>(setup[19] >> 16) + 1);
+    u0 = v0 = 0;
+    u1 = tw - 1;
+    v1 = th - 1;
+    if (rec[1] != 1 || !(setup[0] & 16u)) return false;
     float uv[6];
     std::memcpy(uv, rec + 15, sizeof uv);
-    const int u0 = static_cast<int>(std::floor(std::min(uv[0], uv[3]) / 16.0f)) - 1, u1 = static_cast<int>(std::ceil(std::max(uv[0], uv[3]) / 16.0f)) + 1;
-    const int v0 = static_cast<int>(std::floor(std::min(uv[1], uv[4]) / 16.0f)) - 1, v1 = static_cast<int>(std::ceil(std::max(uv[1], uv[4]) / 16.0f)) + 1;
-    const int tw = std::max(1 << (setup[15] & 0xFFu), static_cast<int>(setup[18] >> 16) + 1), th = std::max(1 << (setup[15] >> 8), static_cast<int>(setup[19] >> 16) + 1);
-    if (u0 < 0 || v0 < 0 || u1 >= tw || v1 >= th) return whole;
+    int a0 = static_cast<int>(std::floor(std::min(uv[0], uv[3]) / 16.0f)) - 1, a1 = static_cast<int>(std::ceil(std::max(uv[0], uv[3]) / 16.0f)) + 1;
+    int b0 = static_cast<int>(std::floor(std::min(uv[1], uv[4]) / 16.0f)) - 1, b1 = static_cast<int>(std::ceil(std::max(uv[1], uv[4]) / 16.0f)) + 1;
+    const auto clamped = [](std::uint32_t mode, int &lo, int &hi, int size) {
+        if (lo >= 0 && hi < size) return true;
+        if (mode != 1 || lo + 1 < 0 || hi - 1 >= size) return false;
+        lo = std::max(lo, 0);
+        hi = std::min(hi, size - 1);
+        return true;
+    };
+    if (!clamped((setup[7] >> 24) & 3u, a0, a1, tw) || !clamped((setup[7] >> 26) & 3u, b0, b1, th)) return false;
+    u0 = a0;
+    v0 = b0;
+    u1 = a1;
+    v1 = b1;
+    return true;
+}
+
+Range read_range(const std::uint32_t *rec, const std::uint32_t *setup, const Range &whole) {
+    int u0, v0, u1, v1;
+    if (!read_rect(rec, setup, u0, v0, u1, v1)) return whole;
     return region(setup[12], setup[13], setup[14], u0, v0, u1, v1);
 }
 
@@ -484,9 +504,9 @@ void plan_decodes(std::uint32_t prims) {
     }
 }
 
-std::uint32_t snapshot_batch(std::uint32_t prims, std::uint32_t &lo, std::uint32_t &hi) {
+std::uint32_t snapshot_batch(std::uint32_t prims, std::uint32_t &lo, std::uint32_t &hi, std::uint32_t &stride, std::uint32_t &run) {
     Batch &b = g_batch;
-    lo = hi = 0;
+    lo = hi = stride = run = 0;
     if (g_batch_reads.empty()) return 0;
     const Range fb = pages(b.fbp, b.fbw, b.fpsm, b.minx, b.miny, b.maxx, b.maxy);
     const Range z = pages(b.zbp, b.fbw, b.zpsm, b.minx, b.miny, b.maxx, b.maxy);
@@ -494,22 +514,61 @@ std::uint32_t snapshot_batch(std::uint32_t prims, std::uint32_t &lo, std::uint32
     bool any = false;
     for (const Range &t : g_batch_reads) any = any || written(t);
     if (!any) return 0;
+    std::uint32_t pw, ph;
+    page_size(b.fpsm, pw, ph);
+    const int per_row = static_cast<int>(std::max<std::uint32_t>(1, b.fbw * 64 / pw));
+    const int fx0 = std::max(b.minx, 0) / static_cast<int>(pw), fy0 = std::max(b.miny, 0) / static_cast<int>(ph);
+    const int fx1 = b.maxx / static_cast<int>(pw), fy1 = b.maxy / static_cast<int>(ph);
+    int px0 = 1 << 30, py0 = 1 << 30, px1 = -1, py1 = -1;
+    bool rect = fx1 < per_row;
     Range shared;
     for (std::uint32_t i = 0; i < prims; ++i) {
         const std::uint32_t *rec = b.prims.data() + i * kPrimWords;
         const std::uint32_t *setup = b.setups.data() + rec[0] * kSetupWords;
         if (!(setup[0] & 2u) || reads_own_word(rec, setup)) continue;
-        const int tw = std::max(1 << (setup[15] & 0xFFu), static_cast<int>(setup[18] >> 16) + 1), th = std::max(1 << (setup[15] >> 8), static_cast<int>(setup[19] >> 16) + 1);
-        const Range t = read_range(rec, setup, region(setup[12], setup[13], setup[14], 0, 0, tw - 1, th - 1));
-        for (const Range *w : {&fb, b.zwrite ? &z : nullptr})
-            if (w && t.overlaps(w->lo, w->hi)) shared.add(std::max(t.lo, w->lo), std::min(t.hi, w->hi));
+        int u0, v0, u1, v1;
+        read_rect(rec, setup, u0, v0, u1, v1);
+        const Range t = region(setup[12], setup[13], setup[14], u0, v0, u1, v1);
+        if (b.zwrite && t.overlaps(z.lo, z.hi)) {
+            shared.add(std::max(t.lo, z.lo), std::min(t.hi, z.hi));
+            rect = false;
+        }
+        if (!t.overlaps(fb.lo, fb.hi)) continue;
+        shared.add(std::max(t.lo, fb.lo), std::min(t.hi, fb.hi));
+        std::uint32_t tpw, tph;
+        page_size(setup[14], tpw, tph);
+        if (setup[12] != b.fbp || setup[13] != b.fbw || tpw != pw || tph != ph || u1 / static_cast<int>(pw) >= per_row) {
+            rect = false;
+            continue;
+        }
+        const int x0 = std::max(u0 / static_cast<int>(pw), fx0), y0 = std::max(v0 / static_cast<int>(ph), fy0);
+        const int x1 = std::min(u1 / static_cast<int>(pw), fx1), y1 = std::min(v1 / static_cast<int>(ph), fy1);
+        if (x0 > x1 || y0 > y1) continue;
+        px0 = std::min(px0, x0);
+        py0 = std::min(py0, y0);
+        px1 = std::max(px1, x1);
+        py1 = std::max(py1, y1);
     }
     if (shared.lo >= shared.hi) return 0;
+    if (rect && px1 >= 0) {
+        const std::uint64_t base = static_cast<std::uint64_t>(b.fbp) * 256 + (static_cast<std::uint64_t>(px0) + static_cast<std::uint64_t>(py0) * per_row) * 8192;
+        if (base + static_cast<std::uint64_t>(py1 - py0 + 1) * per_row * 8192 <= kMemorySize) {
+            lo = static_cast<std::uint32_t>(base / 4);
+            run = static_cast<std::uint32_t>(px1 - px0 + 1) * 2048u;
+            stride = static_cast<std::uint32_t>(per_row) * 2048u;
+            const std::uint32_t rows = static_cast<std::uint32_t>(py1 - py0 + 1);
+            hi = lo + (rows - 1) * stride + run;
+            const std::uint32_t words = rows * run * g_scale * g_scale;
+            dispatch_linear(kSnapshot, words, push_params({lo, words, stride, run}));
+            return words;
+        }
+    }
     lo = static_cast<std::uint32_t>(std::min<std::uint64_t>(shared.lo, kMemorySize) / 4);
     hi = static_cast<std::uint32_t>(std::min<std::uint64_t>(shared.hi, kMemorySize) / 4);
     if (hi <= lo) return 0;
+    stride = run = hi - lo;
     const std::uint32_t words = (hi - lo) * g_scale * g_scale;
-    dispatch_linear(kSnapshot, words, push_params({lo, words}));
+    dispatch_linear(kSnapshot, words, push_params({lo, words, stride, run}));
     return words;
 }
 
@@ -575,9 +634,9 @@ void flush_batch() {
         }
     }
     for (std::uint32_t t : g_touched) g_tile_count[t] = 0;
-    std::uint32_t snapshot_lo, snapshot_hi;
-    const std::uint32_t snapshot = snapshot_batch(prims, snapshot_lo, snapshot_hi);
-    const std::uint32_t param = push_params({tile_offset, prim_offset, setup_offset, tiles, list_offset, snapshot_lo, snapshot_hi});
+    std::uint32_t snapshot_lo, snapshot_hi, snapshot_stride, snapshot_run;
+    const std::uint32_t snapshot = snapshot_batch(prims, snapshot_lo, snapshot_hi, snapshot_stride, snapshot_run);
+    const std::uint32_t param = push_params({tile_offset, prim_offset, setup_offset, tiles, list_offset, snapshot_lo, snapshot_hi, snapshot_stride, snapshot_run});
     note_raster(prims, tiles, total, snapshot);
     g_commands.push_back({kRaster, std::min(tiles, 1024u), (tiles + 1023) / 1024, param});
     mark_rendered(pages(b.fbp, b.fbw, b.fpsm, b.minx, b.miny, b.maxx, b.maxy));

@@ -551,9 +551,11 @@ fn texel_y(s: Setup, yi: i32) -> u32 {
 
 var<private> snapshot_lo: u32 = 0u;
 var<private> snapshot_hi: u32 = 0u;
+var<private> snapshot_stride: u32 = 1u;
+var<private> snapshot_run: u32 = 1u;
 
 fn load_texel(l: Loc, k: u32) -> u32 {
-    if (l.word >= snapshot_lo && l.word < snapshot_hi) {
+    if (l.word >= snapshot_lo && l.word < snapshot_hi && (l.word - snapshot_lo) % snapshot_stride < snapshot_run) {
         return (scratch[(l.word - snapshot_lo) * SCALE * SCALE + k] >> l.shift) & l.mask;
     }
     return load_at(l, k);
@@ -1090,7 +1092,9 @@ fn snapshot(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (i >= prm(1u)) {
         return;
     }
-    scratch[i] = atomicLoad(&vram[prm(0u) * SCALE * SCALE + i]);
+    let run = prm(3u) * SCALE * SCALE;
+    let at = (i / run) * prm(2u) * SCALE * SCALE + i % run;
+    scratch[at] = atomicLoad(&vram[prm(0u) * SCALE * SCALE + at]);
 }
 
 @compute @workgroup_size(64)
@@ -1124,6 +1128,8 @@ fn raster(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) l
     let setups = prm(2u);
     snapshot_lo = prm(5u);
     snapshot_hi = prm(6u);
+    snapshot_stride = max(prm(7u), 1u);
+    snapshot_run = prm(8u);
     var last_setup = 0xFFFFFFFFu;
     var s: Setup;
     for (var i = 0u; i < count; i = i + 1u) {
