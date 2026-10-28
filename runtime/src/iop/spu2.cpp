@@ -76,6 +76,7 @@ struct Core {
 
 std::vector<std::uint16_t> g_ram(kRamWords);
 Core g_cores[2];
+std::uint32_t g_statx_settling[2] = {};
 bool g_block_end[2][24][2];
 
 bool *block_end(const Voice &v) {
@@ -405,7 +406,12 @@ std::uint32_t read_core(int core, std::uint32_t off) {
             if (k.voices[i].end) endx |= 1u << i;
         return off == 0x340 ? endx & 0xFFFFu : endx >> 16;
     }
-    case 0x344: return 0x80u;
+    case 0x344:
+        if (g_statx_settling[core]) {
+            --g_statx_settling[core];
+            return 0;
+        }
+        return 0x80u;
     default: return k.regs[off >> 1];
     }
 }
@@ -422,6 +428,7 @@ void write_core(int core, std::uint32_t off, std::uint32_t value) {
     k.regs[off >> 1] = static_cast<std::uint16_t>(value);
     switch (off) {
     case 0x19A:
+        if ((value & 0x8000u) && !(k.attr & 0x8000u)) g_statx_settling[core] = 16;
         k.attr = static_cast<std::uint16_t>(value);
         if (!(value & 0x40u)) k.irq = false;
         break;
