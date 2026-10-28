@@ -784,7 +784,10 @@ void write_privileged(std::uint32_t address, std::uint64_t value) {
         g_pmode = value;
         break;
     case 0x0010: g_smode1 = value; break;
-    case 0x0020: g_smode2 = value; break;
+    case 0x0020:
+        if (trace_display() && value != g_smode2) std::fprintf(stderr, "[gs] smode2 0x%llX\n", static_cast<unsigned long long>(value));
+        g_smode2 = value;
+        break;
     case 0x0030: g_srfsh = value; break;
     case 0x0040: g_synch1 = value; break;
     case 0x0050: g_synch2 = value; break;
@@ -793,12 +796,18 @@ void write_privileged(std::uint32_t address, std::uint64_t value) {
         if (trace_display() && value != g_dispfb[0]) std::fprintf(stderr, "[gs] dispfb1 0x%llX\n", static_cast<unsigned long long>(value));
         g_dispfb[0] = value;
         break;
-    case 0x0080: g_display[0] = value; break;
+    case 0x0080:
+        if (trace_display() && value != g_display[0]) std::fprintf(stderr, "[gs] display1 0x%llX\n", static_cast<unsigned long long>(value));
+        g_display[0] = value;
+        break;
     case 0x0090:
         if (trace_display() && value != g_dispfb[1]) std::fprintf(stderr, "[gs] dispfb2 0x%llX\n", static_cast<unsigned long long>(value));
         g_dispfb[1] = value;
         break;
-    case 0x00A0: g_display[1] = value; break;
+    case 0x00A0:
+        if (trace_display() && value != g_display[1]) std::fprintf(stderr, "[gs] display2 0x%llX\n", static_cast<unsigned long long>(value));
+        g_display[1] = value;
+        break;
     case 0x00B0: g_extbuf = value; break;
     case 0x00C0: g_extdata = value; break;
     case 0x00D0: g_extwrite = value; break;
@@ -861,6 +870,11 @@ double gpu_busy_ms() {
 #endif
 }
 
+std::uint32_t shown_lines(std::uint32_t dh, std::uint64_t smode2) {
+    const std::uint32_t lines = (ps2::g_options.pal ? 288u : 240u) * ((smode2 & 1u) ? 2u : 1u);
+    return std::min(dh, lines);
+}
+
 DisplayRegs display_regs() { return DisplayRegs{g_pmode, g_smode2, {g_dispfb[0], g_dispfb[1]}, {g_display[0], g_display[1]}}; }
 
 bool present() { return present(display_regs()); }
@@ -872,7 +886,7 @@ bool present(const DisplayRegs &r) {
     if (circuit < 0) return true;
     const std::uint64_t fb = r.dispfb[circuit], disp = r.display[circuit];
     const std::uint32_t magh = (static_cast<std::uint32_t>(disp >> 23) & 0xFu) + 1, magv = (static_cast<std::uint32_t>(disp >> 27) & 3u) + 1;
-    const std::uint32_t width = ((static_cast<std::uint32_t>(disp >> 32) & 0xFFFu) + 1) / magh, height = ((static_cast<std::uint32_t>(disp >> 44) & 0x7FFu) + 1) / magv;
+    const std::uint32_t width = ((static_cast<std::uint32_t>(disp >> 32) & 0xFFFu) + 1) / magh, height = shown_lines((static_cast<std::uint32_t>(disp >> 44) & 0x7FFu) + 1, r.smode2) / magv;
     if (!width || !height || width > 2048 || height > 2048) return true;
     const gpu::DisplaySource src{(static_cast<std::uint32_t>(fb) & 0x1FFu) * 32, static_cast<std::uint32_t>(fb >> 9) & 0x3Fu, static_cast<std::uint32_t>(fb >> 15) & 0x1Fu,
                                  static_cast<std::uint32_t>(fb >> 32) & 0x7FFu, static_cast<std::uint32_t>(fb >> 43) & 0x7FFu, width, height, (r.smode2 & 3u) == 3u};
@@ -892,7 +906,7 @@ bool display(const DisplayRegs &r, std::vector<std::uint32_t> &rgba, std::uint32
     const std::uint32_t psm = static_cast<std::uint32_t>(fb >> 15) & 0x1Fu;
     const std::uint32_t dbx = static_cast<std::uint32_t>(fb >> 32) & 0x7FFu, dby = static_cast<std::uint32_t>(fb >> 43) & 0x7FFu;
     const std::uint32_t magh = (static_cast<std::uint32_t>(disp >> 23) & 0xFu) + 1, magv = (static_cast<std::uint32_t>(disp >> 27) & 3u) + 1;
-    const std::uint32_t dw = (static_cast<std::uint32_t>(disp >> 32) & 0xFFFu) + 1, dh = (static_cast<std::uint32_t>(disp >> 44) & 0x7FFu) + 1;
+    const std::uint32_t dw = (static_cast<std::uint32_t>(disp >> 32) & 0xFFFu) + 1, dh = shown_lines((static_cast<std::uint32_t>(disp >> 44) & 0x7FFu) + 1, r.smode2);
     width = dw / magh;
     height = dh / magv;
     if (!width || !height || width > 2048 || height > 2048) return false;
