@@ -201,6 +201,11 @@ void send_mbx(Cpu &c, int id, std::uint32_t message, bool from_interrupt) {
 }
 
 struct HardTimer {
+    std::uint32_t compare = 0, handler = 0, common = 0, source = 1, prescale = 1, mode = 0, reached = 0;
+    bool running = false, interrupt = false;
+    std::uint64_t generation = 0;
+};
+struct LegacyHardTimer {
     std::uint32_t compare = 0, handler = 0, common = 0, source = 1, prescale = 1;
     bool running = false;
     std::uint64_t generation = 0;
@@ -224,6 +229,15 @@ std::uint32_t hard_timer_counter(std::uint32_t id) {
 
 void fire_hard_timer(std::uint32_t id, std::uint64_t generation) {
     auto it = g_hard_timers.find(id);
+    if (it != g_hard_timers.end() && it->second.running && it->second.generation == generation && it->second.interrupt) {
+        it->second.reached |= 0x800u;
+        hw::raise_interrupt(14);
+        it = g_hard_timers.find(id);
+        if (it == g_hard_timers.end() || !it->second.running || it->second.generation != generation) return;
+        if (it->second.mode & 0x40u) arm_hard_timer(id);
+        else it->second.running = false;
+        return;
+    }
     if (it == g_hard_timers.end() || !it->second.running || it->second.generation != generation || !it->second.handler) return;
     const std::uint32_t next = call_guest(it->second.handler, it->second.common);
     it = g_hard_timers.find(id);
@@ -239,7 +253,7 @@ void fire_hard_timer(std::uint32_t id, std::uint64_t generation) {
 void arm_hard_timer(std::uint32_t id) {
     HardTimer &t = g_hard_timers[id];
     const std::uint64_t generation = ++t.generation;
-    if (!t.running || !t.handler || !t.compare) return;
+    if (!t.running || (!t.handler && !t.interrupt) || !t.compare) return;
     schedule(now() + timer_cycles(t, t.compare), Job{kJobHardTimer, id, static_cast<std::uint32_t>(generation), static_cast<std::uint32_t>(generation >> 32)});
 }
 
@@ -1072,17 +1086,42 @@ void install_vblank() {
 
 void install_timrman() {
     register_hle_library("timrman", 0x0101);
-    def("timrman", 4, "AllocHardTimer", [](Cpu &c) { c.r[2] = g_next_hard_timer++; });
+    def("timrman", 4, "AllocHardTimer", [](Cpu &c) {
+        const std::uint32_t id = g_next_hard_timer++;
+        HardTimer &t = g_hard_timers[id];
+        t.source = arg(c, 0);
+        t.prescale = std::max<std::uint32_t>(arg(c, 2), 1u);
+        c.r[2] = id;
+    });
     def("timrman", 5, "ReferHardTimer", [](Cpu &c) { c.r[2] = 1; });
     def("timrman", 6, "FreeHardTimer", [](Cpu &c) { c.r[2] = 0; });
-    def("timrman", 7, "SetTimerMode", [](Cpu &c) { c.r[2] = 0; });
+    def("timrman", 7, "SetTimerMode", [](Cpu &c) {
+        HardTimer &t = g_hard_timers[arg(c, 0)];
+        t.mode = arg(c, 1);
+        t.interrupt = (t.mode & 0x30u) != 0;
+        t.running = t.interrupt;
+        g_hard_timer_start[arg(c, 0)] = now();
+        if (t.running) arm_hard_timer(arg(c, 0));
+        else ++t.generation;
+        c.r[2] = 0;
+    });
+    def("timrman", 8, "GetTimerStatus", [](Cpu &c) {
+        HardTimer &t = g_hard_timers[arg(c, 0)];
+        c.r[2] = t.mode | t.reached;
+        t.reached = 0;
+    });
     def("timrman", 9, "SetTimerCounter", [](Cpu &c) {
         const auto it = g_hard_timers.find(arg(c, 0));
         if (it != g_hard_timers.end()) g_hard_timer_start[arg(c, 0)] = now() - std::min<std::uint64_t>(now(), static_cast<std::uint64_t>(arg(c, 1)) * timer_cycles(it->second, 1));
         c.r[2] = 0;
     });
     def("timrman", 10, "GetTimerCounter", [](Cpu &c) { c.r[2] = hard_timer_counter(arg(c, 0)); });
-    def("timrman", 11, "SetTimerCompare", [](Cpu &c) { c.r[2] = 0; });
+    def("timrman", 11, "SetTimerCompare", [](Cpu &c) {
+        HardTimer &t = g_hard_timers[arg(c, 0)];
+        t.compare = arg(c, 1);
+        if (t.running && t.interrupt) arm_hard_timer(arg(c, 0));
+        c.r[2] = 0;
+    });
     def("timrman", 16, "GetHardTimerIntrCode", [](Cpu &c) { c.r[2] = 14; });
     def("timrman", 20, "SetTimerHandler", [](Cpu &c) {
         HardTimer &t = g_hard_timers[arg(c, 0)];
@@ -1270,7 +1309,31 @@ void libs_state(ps2::state::Stream &s) {
     s.vec(g_vblank_start_waiters);
     s.vec(g_vblank_end_waiters);
     s.map(g_alarms);
-    s.map(g_hard_timers);
+    if (s.version() >= 5)
+        s.map(g_hard_timers, [&s](HardTimer &t) {
+            s.pod(t.compare);
+            s.pod(t.handler);
+            s.pod(t.common);
+            s.pod(t.source);
+            s.pod(t.prescale);
+            s.pod(t.mode);
+            s.pod(t.reached);
+            s.pod(t.running);
+            s.pod(t.interrupt);
+            s.pod(t.generation);
+        });
+    else
+        s.map(g_hard_timers, [&s](HardTimer &t) {
+            LegacyHardTimer old;
+            s.pod(old);
+            t.compare = old.compare;
+            t.handler = old.handler;
+            t.common = old.common;
+            t.source = old.source;
+            t.prescale = old.prescale;
+            t.running = old.running;
+            t.generation = old.generation;
+        });
     s.pod(g_next_alarm);
     s.pod(g_next_object);
     s.pod(g_rotate_order);
