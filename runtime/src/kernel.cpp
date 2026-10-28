@@ -557,7 +557,15 @@ void handle_syscall(Cpu &c, std::uint32_t pc) {
         break;
     }
     case 0x2F: ret(c, g_current); break;
-    case 0x30: case 0x31: write_thread_status(static_cast<int>(arg(c, 0)), arg(c, 1)); ret(c, thread(static_cast<int>(arg(c, 0))) ? thread(static_cast<int>(arg(c, 0)))->status : -1); break;
+    case 0x30: case 0x31: {
+        const int id = static_cast<int>(arg(c, 0));
+        write_thread_status(id, arg(c, 1));
+        // the kernel returns the status of the thread slot, which is 0 once the
+        // thread is gone: MGS2 waits for a worker thread that way
+        const Thread *t = thread(id);
+        ret(c, t ? t->status : id >= 0 && id < 256 ? 0 : -1);
+        break;
+    }
     case 0x32: {
         Thread *t = current();
         ret(c, g_current);

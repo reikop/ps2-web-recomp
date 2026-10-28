@@ -181,6 +181,8 @@ void acknowledge_interrupt(unsigned line) {
 }
 
 void dma_done(unsigned ch) {
+    // a transfer the driver stopped by clearing the start bit never completes
+    if (!(g_dma[ch].chcr & 0x01000000u)) return;
     g_dma[ch].chcr &= ~0x01000000u;
     if (ch < 7) g_dicr |= 1u << (24 + ch);
     else g_dicr2 |= 1u << (24 + ch - 7);
@@ -257,8 +259,10 @@ void write(std::uint32_t a, std::uint32_t v, unsigned size) {
         std::uint32_t &target = reg == 0 ? d.madr : reg == 1 ? d.bcr : reg == 2 ? d.chcr : d.tadr;
         const unsigned shift = (a & 3u) * 8;
         const std::uint32_t mask = size >= 4 ? 0xFFFFFFFFu : ((1u << (size * 8)) - 1u) << shift;
+        const bool was_running = (d.chcr & 0x01000000u) != 0;
         target = (target & ~mask) | ((v << shift) & mask);
         if (reg == 2 && (d.chcr & 0x01000000u) && (mask & 0x01000000u)) start_dma(static_cast<unsigned>(ch));
+        else if (reg == 2 && was_running && (mask & 0x01000000u) && (ch == 4 || ch == 7)) spu2::stop_dma(ch == 4 ? 0 : 1);
         return;
     }
     report("write", a, v);

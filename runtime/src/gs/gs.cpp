@@ -36,6 +36,7 @@ alignas(64) std::uint8_t g_memory[kMemorySize];
 std::uint64_t g_pmode, g_smode1, g_smode2, g_srfsh, g_synch1, g_synch2, g_syncv;
 std::uint64_t g_dispfb[2], g_display[2], g_extbuf, g_extdata, g_extwrite, g_bgcolor;
 std::uint64_t g_csr = 0x551B4000ull, g_imr = 0x7F00ull, g_busdir, g_siglblid;
+std::uint32_t g_finish_pending = 0;
 std::uint64_t g_primitives = 0;
 
 #ifdef PS2_GPU
@@ -475,6 +476,7 @@ void reset() {
     }
     g_csr = 0x551B4000ull;
     g_imr = 0x7F00ull;
+    g_finish_pending = 0;
     if (queue::active()) queue::post(queue::kReset, 0, 0, nullptr, 0);
     else render_reset();
 }
@@ -636,7 +638,14 @@ void signal(std::uint32_t reg, std::uint64_t value) {
         g_siglblid = (g_siglblid & ~static_cast<std::uint64_t>(mask)) | (id & mask);
         raise(1);
         break;
-    case 0x61: raise(2); break;
+    case 0x61:
+        // The GS here finishes a whole chain at once, where the real one
+        // spaces its FINISH events out over the drawing. A game that counts
+        // them would lose those landing before its handler cleared the last,
+        // so they wait and are raised one by one as CSR.FINISH is cleared.
+        if (g_csr & 2u) ++g_finish_pending;
+        else raise(2);
+        break;
     case 0x62: {
         const std::uint64_t label = (g_siglblid >> 32 & ~static_cast<std::uint64_t>(mask)) | (id & mask);
         g_siglblid = (g_siglblid & 0xFFFFFFFFull) | (label << 32);
@@ -814,7 +823,12 @@ void write_privileged(std::uint32_t address, std::uint64_t value) {
     case 0x00E0: g_bgcolor = value; break;
     case 0x1000:
         g_csr &= ~(value & 0x1Fu);
+        if ((value & 2u) && g_finish_pending) {
+            --g_finish_pending;
+            raise(2);
+        }
         if (value & 0x200u) {
+            g_finish_pending = 0;
             g_csr = 0x551B4000ull;
             if (queue::active()) queue::post(queue::kSoftReset, 0, 0, nullptr, 0);
             else soft_reset();
@@ -1119,6 +1133,8 @@ void render_state(ps2::state::Stream &s) {
     s.pod(g_imr);
     s.pod(g_busdir);
     s.pod(g_siglblid);
+    if (s.version() >= 6) s.pod(g_finish_pending);
+    else g_finish_pending = 0;
     s.pod(g_primitives);
     s.pod(g_odd_field);
     s.pod(g_transfer);

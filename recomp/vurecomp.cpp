@@ -143,7 +143,7 @@ Upper upper(std::uint32_t hi, bool flags_live) {
     if (kind == Nop) return u;
     if (kind == Clip) {
         u.pre = std::format("const std::uint32_t uclip = clip_value(r, r.vf[{}], r.vf[{}].w[3]); ", fs, ft);
-        u.post = "r.clip = uclip; fl.set_clip(uclip, fl.t); ";
+        u.post = "r.clip = uclip; fl.set_clip(uclip, fl.now()); ";
         return u;
     }
     unsigned d = dest;
@@ -282,6 +282,8 @@ std::string lanes_store(unsigned dest, const std::string &qword_expr, const std:
 
 struct Lower {
     std::string code;
+    // Runs after the upper instruction of the pair has committed its flags (FSSET)
+    std::string after_upper;
     int writes = -1;
     bool reads_flags = false, reads_status = false;
     bool branch = false, jump = false;
@@ -382,8 +384,8 @@ Lower lower(std::uint32_t w, std::uint32_t pc) {
         case 0x64:
             if (ft) l.writes = static_cast<int>(ft);
             if (ft) for (int i = 0; i < 4; ++i) if (lane(dest, i)) c += std::format("r.vf[{}].w[{}] = r.p; ", ft, i); break;
-        case 0x68: c = std::format("set_vi(r, {}, vu::top()); ", it); break;
-        case 0x69: c = std::format("set_vi(r, {}, vu::itop()); ", it); break;
+        case 0x68: c = std::format("set_vi(r, {}, vu::top(1)); ", it); break;
+        case 0x69: c = std::format("set_vi(r, {}, vu::itop(1)); ", it); break;
         case 0x6C: c = std::format("vu::kick(1, r.vi[{}]); ", is); break;
         case 0x70: case 0x71: case 0x72: case 0x73: case 0x74: case 0x75: case 0x76: case 0x78: case 0x79: case 0x7A: case 0x7C: case 0x7D: case 0x7E:
             c = std::format("efu(r, {}u, {}u, {}u); ", index, fs, fsf);
@@ -421,11 +423,11 @@ Lower lower(std::uint32_t w, std::uint32_t pc) {
     case 0x08: c = std::format("set_vi(r, {}, r.vi[{}] + {}u); ", it, is, imm15); break;
     case 0x09: c = std::format("set_vi(r, {}, r.vi[{}] - {}u); ", it, is, imm15); break;
     case 0x10: c = std::format("set_vi(r, 1, (fl.clip() & 0xFFFFFFu) == {}u ? 1u : 0u); ", w & 0xFFFFFFu); break;
-    case 0x11: c = std::format("r.clip = {}u; fl.set_clip(r.clip, fl.t - 4u); ", w & 0xFFFFFFu); break;
+    case 0x11: c = std::format("r.clip = {}u; fl.set_clip(r.clip, fl.now() - 4u); ", w & 0xFFFFFFu); break;
     case 0x12: c = std::format("set_vi(r, 1, (fl.clip() & {}u) ? 1u : 0u); ", w & 0xFFFFFFu); break;
     case 0x13: c = std::format("set_vi(r, 1, ((fl.clip() | {}u) & 0xFFFFFFu) == 0xFFFFFFu ? 1u : 0u); ", w & 0xFFFFFFu); break;
     case 0x14: c = std::format("set_vi(r, {}, (fl.status() & 0xFFFu) == {}u ? 1u : 0u); ", it, imm12); l.reads_flags = l.reads_status = true; break;
-    case 0x15: c = std::format("r.status = (fl.status() & 0x3Fu) | ({}u & 0xFC0u); fl.force_mac(r.mac, r.status); ", imm12); l.reads_flags = l.reads_status = true; break;
+    case 0x15: l.after_upper = std::format("r.status = (r.status & 0x3Fu) | {}u; fl.force_mac(r.mac, r.status); ", imm12 & 0xFC0u); l.reads_flags = l.reads_status = true; break;
     case 0x16: c = std::format("set_vi(r, {}, fl.status() & {}u); ", it, imm12); l.reads_flags = l.reads_status = true; break;
     case 0x17: c = std::format("set_vi(r, {}, (fl.status() & 0xFFFu) | {}u); ", it, imm12); l.reads_flags = l.reads_status = true; break;
     case 0x18: c = std::format("set_vi(r, {}, (fl.mac() & 0xFFFFu) == r.vi[{}] ? 1u : 0u); ", it, is); l.reads_flags = true; break;
@@ -486,7 +488,7 @@ std::string generate(const Program &p, std::string &name) {
     const std::vector<std::uint32_t> pcs = ps2::vu::reachable(p.code.data(), kMask, p.entry);
     std::set<std::uint32_t> in(pcs.begin(), pcs.end());
     std::map<std::uint32_t, Lower> lowers;
-    bool any_status = false, any_flags = false, any_q = false;
+    bool any_status = false, any_flags = false, any_q = false, any_clip = false;
     for (std::uint32_t pc : pcs) {
         const std::uint32_t lo = word(p.code, pc), hi = word(p.code, pc + 4);
         Lower l;
@@ -497,6 +499,7 @@ std::string generate(const Program &p, std::string &name) {
         any_status = any_status || l.reads_status;
         any_flags = any_flags || l.reads_flags;
         any_q = any_q || l.code.find("fl.end_q(") != std::string::npos;
+        any_clip = any_clip || ps2::vu::reads_clip(lo, hi);
         lowers[pc] = l;
     }
     std::map<std::uint32_t, bool> live_in;
@@ -592,7 +595,11 @@ std::string generate(const Program &p, std::string &name) {
         if (keep_bk.count(pc)) body += "bk = next_bk; ";
         if (set_bi.count(pc)) body += std::format("bi = {}u; ", std::max(def[pc], 0));
         body += u.post;
+        if (!(hi & 0x80000000u) && l.supported) body += l.after_upper;
         o += std::format("{}: {{ ++fl.t; ", label(pc));
+        // waits count toward the clip flags only
+        if (any_clip)
+            if (const std::uint32_t wait = ps2::vu::stall(p.code.data(), kMask, pc)) o += std::format("fl.stalls += {}u; ", wait);
         if (any_q && ps2::vu::reads_q(hi)) {
             const ps2::vu::QRead kind = ps2::vu::q_read_kind(p.code.data(), kMask, pc);
             if (kind == ps2::vu::kQNew) o += "fl.flush_q(r); ";
