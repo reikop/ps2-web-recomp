@@ -1855,11 +1855,12 @@ void Translator::prologue() {
 
 bool Translator::run(std::vector<std::uint8_t> &out) {
     pcs_ = reachable(code_, kMask, entry_);
-    if (pcs_.empty()) return false;
+    if (pcs_.empty() || branch_in_delay_slot(code_, kMask, entry_)) return false;
     in_.insert(pcs_.begin(), pcs_.end());
     for (std::uint32_t pc : pcs_) {
         LowerInfo l;
         if (!(word(pc + 4) & 0x80000000u)) l = analyze_lower(word(pc), pc);
+        if (branch_in_delay_slot(code_, kMask, pc)) l.supported = false;
         any_status_ = any_status_ || l.reads_status;
         any_flags_ = any_flags_ || l.reads_flags;
         lowers_[pc] = l;

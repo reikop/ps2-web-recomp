@@ -491,6 +491,7 @@ std::string generate(const Program &p, std::string &name) {
         const std::uint32_t lo = word(p.code, pc), hi = word(p.code, pc + 4);
         Lower l;
         if (!(hi & 0x80000000u)) l = lower(lo, pc);
+        if (ps2::vu::branch_in_delay_slot(p.code.data(), kMask, pc)) l.supported = false;
         for (const std::uint32_t latency : {7u, 13u})
             replace_all(l.code, std::format("fl.end_q(r, qb, {}u)", latency), std::format("fl.end_q(r, qb, {}u)", ps2::vu::q_delay(p.code.data(), kMask, pc, latency)));
         any_status = any_status || l.reads_status;
@@ -652,6 +653,7 @@ int main(int argc, char **argv) {
             std::fprintf(stderr, "%s: key mismatch, skipped\n", e.path().filename().c_str());
             continue;
         }
+        if (ps2::vu::branch_in_delay_slot(p.code.data(), kMask, entry)) continue;
         programs.push_back(std::move(p));
     }
     std::set<std::uint64_t> keys;
@@ -668,6 +670,7 @@ int main(int argc, char **argv) {
         }
         for (std::uint32_t target : targets) {
             const std::uint64_t key = ps2::vu::program_key(programs[i].code.data(), ps2::vu::reachable(programs[i].code.data(), kMask, target), target);
+            if (ps2::vu::branch_in_delay_slot(programs[i].code.data(), kMask, target)) continue;
             if (keys.insert(key).second) programs.push_back(Program{key, target, programs[i].code});
         }
     }
