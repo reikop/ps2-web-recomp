@@ -407,9 +407,9 @@ bool reads_own_word(const std::uint32_t *rec, const std::uint32_t *setup) {
     const int ox = texel(uv[0], uv[3], f[0], f[2], x0) - x0;
     if (texel(uv[0], uv[3], f[0], f[2], x1) - x1 != ox) return false;
     const auto wide = [](std::uint32_t psm) { return psm == PSMCT32 || psm == PSMCT24 || psm == PSMT8H || psm == PSMT4HL || psm == PSMT4HH; };
-    if (ox == 0) return tpsm == fpsm || (wide(fpsm) && wide(tpsm));
-    const bool half = fpsm == PSMCT16 || fpsm == PSMCT16S;
-    return half && tpsm == fpsm && (ox == 8 || ox == -8) && x1 - x0 < 8 && (x0 & 8) == (x1 & 8) && ((x0 ^ 8) == x0 + ox);
+    // A 16-bit sprite reading the other half of its word (x ^ 8, a channel shuffle) reads the copy like any other: nothing
+    // makes the pixel holding that half read before this one writes, and PCSX2 too reads a draw's texture as it was before it.
+    return ox == 0 && (tpsm == fpsm || (wide(fpsm) && wide(tpsm)));
 }
 
 Range read_range(const std::uint32_t *rec, const std::uint32_t *setup, const Range &whole) {
