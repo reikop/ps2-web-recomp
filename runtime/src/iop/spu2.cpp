@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <cmath>
 #include <cstring>
 #include <deque>
 #include <vector>
@@ -266,6 +267,12 @@ void tick() {
     std::int16_t rings[2][8][kBatch] = {};
     static const bool count = std::getenv("PS2_SPU2_COUNT") != nullptr;
     static std::uint64_t ticks = 0, active = 0, phases[5] = {};
+    static const char *const mute = std::getenv("PS2_SPU2_MUTE");
+    static const bool mute_music = mute && std::strcmp(mute, "music") == 0, mute_voices = mute && std::strcmp(mute, "voices") == 0;
+    static const bool levels = std::getenv("PS2_SPU2_LEVELS") != nullptr;
+    static double voice_energy = 0, music_energy = 0;
+    static std::uint64_t level_samples = 0;
+    std::int32_t voices[2][kBatch][2] = {};
     for (int c = 0; c < 2; ++c) {
         for (int i = 0; i < 24; ++i) {
             Voice &v = g_cores[c].voices[i];
@@ -276,6 +283,7 @@ void tick() {
             }
             render_voice(v, sum[c], i == 1 ? rings[c][2] : i == 3 ? rings[c][3] : nullptr);
         }
+        std::memcpy(voices[c], sum[c], sizeof voices[c]);
         // Reverb is not modelled, so the wet rings stay silent.
         for (unsigned n = 0; n < kBatch; ++n) {
             rings[c][4][n] = clamp16(sum[c][n][0]);
@@ -284,6 +292,23 @@ void tick() {
         std::int16_t unused[2];
         for (unsigned n = 0; n < kBatch; ++n)
             render_input(c, sum[c][n][0], sum[c][n][1], c ? unused[0] : rings[0][0][n], c ? unused[1] : rings[0][1][n]);
+        for (unsigned n = 0; n < kBatch; ++n)
+            for (int s = 0; s < 2; ++s) {
+                const std::int32_t music = sum[c][n][s] - voices[c][n][s], scale = master(g_cores[c].mvol[s]);
+                if (levels) {
+                    const double v = static_cast<double>(voices[c][n][s] * scale >> 15), m = static_cast<double>(music * scale >> 15);
+                    voice_energy += v * v;
+                    music_energy += m * m;
+                }
+                if (mute_music) sum[c][n][s] = voices[c][n][s];
+                else if (mute_voices) sum[c][n][s] = music;
+            }
+    }
+    if (levels && (level_samples += kBatch) >= 48000u * 2u) {
+        std::fprintf(stderr, "[spu2] levels: voices %.0f, music %.0f, mvol core0 %04X/%04X core1 %04X/%04X\n", std::sqrt(voice_energy / static_cast<double>(level_samples * 2)),
+                     std::sqrt(music_energy / static_cast<double>(level_samples * 2)), g_cores[0].mvol[0], g_cores[0].mvol[1], g_cores[1].mvol[0], g_cores[1].mvol[1]);
+        voice_energy = music_energy = 0;
+        level_samples = 0;
     }
     for (unsigned n = 0; n < kBatch; ++n) {
         std::int32_t mix[2] = {};
