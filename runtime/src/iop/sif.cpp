@@ -765,7 +765,12 @@ std::uint32_t set_dma(std::uint32_t transfers, std::uint32_t count) {
         if (dst == kRpcRecvAddr) g_data_addr = src;
         else if (dst == 0) reboot(src);
         else if (dst == kCmdBuffer) command(src, size);
-        else std::memcpy(iop::ram_ptr(dst), g_ram + src, std::min(size, iop::kRamSize - (iop::phys(dst) & (iop::kRamSize - 1))));
+        else {
+            // SIF DMA moves whole quadwords, so a size that is not a multiple of 16 still
+            // carries the rest of its last quadword. Sound drivers keep a ready flag there.
+            const std::uint32_t moved = std::min({(size + 15u) & ~15u, iop::kRamSize - (iop::phys(dst) & (iop::kRamSize - 1)), kRamSize - src});
+            std::memcpy(iop::ram_ptr(dst), g_ram + src, moved);
+        }
     }
     g_ee_dma_done = std::max(g_ee_dma_done, now()) + 256u + bytes * 2u;
     return g_ee_dma_id++;
