@@ -830,6 +830,46 @@ void check_jit(ProgramFn compiled, ProgramFn jit) {
 }
 
 void run_entry(int unit, std::uint32_t pc);
+void run_fast(int n, std::uint32_t address);
+
+void check_jit_against_interpreter(ProgramFn jit, std::uint32_t pc) {
+    static std::uint64_t calls = 0, escapes = 0, mismatches = 0;
+    static std::uint8_t before_mem[16384], jit_mem[16384];
+    const Vu0Regs before = g_vu1;
+    std::memcpy(before_mem, g_vu1_mem, sizeof before_mem);
+    std::vector<std::uint32_t> jit_kicks;
+    jit::g_dry = true;
+    jit::g_escape = -1;
+    jit::g_kicks = &jit_kicks;
+    jit(g_vu1, g_vu1_mem);
+    jit::g_dry = false;
+    const std::int64_t jit_escape = jit::g_escape;
+    const Vu0Regs after = g_vu1;
+    std::memcpy(jit_mem, g_vu1_mem, sizeof jit_mem);
+    g_vu1 = before;
+    std::memcpy(g_vu1_mem, before_mem, sizeof before_mem);
+    run_fast(1, pc);
+    ++calls;
+    if (jit_escape >= 0) ++escapes;
+    else if (std::memcmp(&after, &g_vu1, sizeof after) != 0 || std::memcmp(jit_mem, g_vu1_mem, sizeof jit_mem) != 0) {
+        if (++mismatches <= 20) {
+            int vf = -1, vi = -1, word = -1;
+            for (int i = 0; i < 32 && vf < 0; ++i)
+                if (std::memcmp(&after.vf[i], &g_vu1.vf[i], 16) != 0) vf = i;
+            for (int i = 0; i < 16 && vi < 0; ++i)
+                if (after.vi[i] != g_vu1.vi[i]) vi = i;
+            for (int i = 0; i < 16384 && word < 0; ++i)
+                if (jit_mem[i] != g_vu1_mem[i]) word = i;
+            std::fprintf(stderr, "[jit] differs from the interpreter at entry 0x%04X key %016llX: vf%d vi%d q/p/i/r %d flags %d mem %d\n", pc & 16383u,
+                         static_cast<unsigned long long>(g_entries[(pc & 16383u) >> 3].key), vf, vi,
+                         after.q != g_vu1.q || after.p != g_vu1.p || after.i != g_vu1.i || after.r != g_vu1.r,
+                         after.mac != g_vu1.mac || after.status != g_vu1.status || after.clip != g_vu1.clip, word);
+        }
+    }
+    if (calls % 2000 == 0)
+        std::fprintf(stderr, "[jit] checked %llu interpreted calls, %llu mismatches, %llu left early\n", static_cast<unsigned long long>(calls),
+                     static_cast<unsigned long long>(mismatches), static_cast<unsigned long long>(escapes));
+}
 
 bool g_chaining = false;
 std::int64_t g_chained = -1;
@@ -926,6 +966,14 @@ void run_entry(int unit, std::uint32_t pc) {
             return;
         }
     }
+    if (unit == 1 && !interpret_only && jit::mode() == 3) {
+        const ProgramFn jit = g_entries[(pc & 16383u) >> 3].jit;
+        static std::uint64_t sampled = 0;
+        if (jit && ++sampled % 8 == 0) {
+            check_jit_against_interpreter(jit, pc);
+            return;
+        }
+    }
     if (unit == 1) g_interpreted_calls.fetch_add(1, std::memory_order_relaxed);
     if (count && unit == 1) {
         ++misses[pc];
@@ -958,7 +1006,7 @@ ProgramFn lookup(std::uint32_t address) {
     e.function = it == g_programs.end() ? nullptr : it->second;
     e.jit = nullptr;
     const int jit_mode = jit::mode();
-    if (jit_mode == 2 || (jit_mode >= 1 && !e.function)) e.function = jit_program(key, address);
+    if (jit_mode == 2 || (jit_mode >= 1 && jit_mode != 3 && !e.function)) e.function = jit_program(key, address);
     else if (jit_mode == 3) e.jit = jit_program(key, address);
     Candidate c = make_candidate(pcs);
     c.key = key;
