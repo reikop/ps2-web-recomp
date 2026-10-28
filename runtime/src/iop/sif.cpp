@@ -281,6 +281,13 @@ void read_reboot_image(const std::string &image_path) {
     if (image.empty() || !disc::read(entry->sector, static_cast<std::uint32_t>(image.size() / disc::kSector), image.data())) return;
     for (std::size_t at = 0; at + 16 <= image.size() && image[at]; at += 16)
         if (std::memcmp(&image[at], "FILEIO\0", 7) == 0) g_fileio_async = true;
+    static const char kFileio[] = "PsIIfileio  ";
+    const auto fileio = std::search(image.begin(), image.end(), kFileio, kFileio + sizeof kFileio - 1);
+    if (image.end() - fileio >= static_cast<std::ptrdiff_t>(sizeof kFileio + 3)) {
+        const std::string version(fileio + sizeof kFileio - 1, fileio + sizeof kFileio + 3);
+        if (version < "2000") g_fileio_async = false;
+        std::fprintf(stderr, "[sif] FILEIO from %s reports %s, %s protocol\n", image_path.c_str(), version.c_str(), g_fileio_async ? "asynchronous" : "synchronous");
+    }
     static const char kTag[] = "PsIIloadfile";
     const auto it = std::search(image.begin(), image.end(), kTag, kTag + sizeof kTag - 1);
     if (image.end() - it < static_cast<std::ptrdiff_t>(sizeof kTag + 3)) return;

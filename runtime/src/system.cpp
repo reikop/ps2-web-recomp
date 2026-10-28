@@ -377,8 +377,17 @@ bool load_elf(const std::string &path, std::uint32_t &entry) {
     for (std::uint32_t i = 0; i < u16(44); ++i) {
         const std::size_t ph = phoff + i * u16(42);
         if (u32(ph) != 1) continue;
-        const std::uint32_t offset = u32(ph + 4), vaddr = physical(u32(ph + 8)), filesz = u32(ph + 16), memsz = u32(ph + 20);
-        if (vaddr + memsz > kRamSize || offset + filesz > data.size()) return false;
+        const std::uint32_t offset = u32(ph + 4), filesz = u32(ph + 16), memsz = u32(ph + 20);
+        if (offset + filesz > data.size() || filesz > memsz) return false;
+        if (const std::uint32_t at = u32(ph + 8); (at >> 14) == (kScratchpadBase >> 14)) {
+            const std::uint32_t start = at & (kScratchpadSize - 1);
+            if (start + memsz > kScratchpadSize) return false;
+            std::memcpy(g_spr + start, data.data() + offset, filesz);
+            std::memset(g_spr + start + filesz, 0, memsz - filesz);
+            continue;
+        }
+        const std::uint32_t vaddr = physical(u32(ph + 8));
+        if (vaddr + memsz > kRamSize) return false;
         std::memcpy(g_ram + vaddr, data.data() + offset, filesz);
         watch_span(vaddr, filesz, "boot:load_exec");
         std::memset(g_ram + vaddr + filesz, 0, memsz - filesz);
